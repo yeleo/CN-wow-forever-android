@@ -2104,6 +2104,7 @@ fun XServerScreen(
 
                     setupExecutor.submit {
                         try {
+                            LauncherDebugLogger.log("P5_XSERVER", "setupExecutor background thread started: isExiting=${isExiting.get()}")
                             if (isExiting.get()) return@submit
                             val containerManager = ContainerManager(context)
                             // Configure WinHandler with container's input API settings
@@ -2243,15 +2244,16 @@ fun XServerScreen(
                                     Timber.d("Game paused after environment setup while app was backgrounded")
                                 }
                             }
-                        } catch (e: Exception) {
-                            Timber.e(e, "Error during wine setup operations")
+                        } catch (t: Throwable) {
+                            LauncherDebugLogger.logException("P7_CRASH", "setupExecutor", t)
+                            Timber.e(t, "Error during wine setup operations")
                             try {
                                 PluviaApp.xEnvironment?.stopEnvironmentComponents()
                             } catch (cleanupEx: Exception) {
                                 Timber.e(cleanupEx, "Error cleaning up environment after setup failure")
                             }
                             PluviaApp.xEnvironment = null
-                            onGameLaunchError?.invoke("Failed to setup wine: ${e.message}")
+                            onGameLaunchError?.invoke("Failed to setup wine: ${t.message}")
                         } finally {
                             setupExecutor.shutdown()
                         }
@@ -3685,61 +3687,16 @@ private fun setupXEnvironment(
             guestProgramLauncherComponent.setFEXCorePreset(container.fexCorePreset)
         }
         guestProgramLauncherComponent.setPreUnpack {
+            LauncherDebugLogger.log("P6_PREUNPACK", "setPreUnpack entry: needsUnpacking=${container.isNeedsUnpacking}")
             if (container.isNeedsUnpacking) {
                 container.setNeedsUnpacking(false)
                 container.saveData()
             }
-
-            val cTmp = File(container.rootDir, ".wine/drive_c/bnet_token.tmp")
-            val eTmp = File(context.filesDir.parentFile, "storage/bnet_token.tmp")
-            if (cTmp.exists() || eTmp.exists()) {
-                val startTime = System.currentTimeMillis()
-                PluviaApp.events.emit(AndroidEvent.SetBootingSplashText("Injecting Battle.net credentials..."))
-                LauncherDebugLogger.log("TOKEN_INJECT", "Running Wine DPAPI injector before game start...")
-                var injectorOutput = ""
-                var injectorSucceeded = false
-                try {
-                    val output = guestProgramLauncherComponent.execShellCommand("wine bnet_token_injector.exe", true)
-                    val duration = System.currentTimeMillis() - startTime
-                    injectorOutput = output?.trim() ?: ""
-                    LauncherDebugLogger.log("TOKEN_INJECT", "Injector executed in ${duration}ms, output: $injectorOutput")
-                    if (injectorOutput.contains("[injector] Success")) {
-                        injectorSucceeded = true
-                        LauncherDebugLogger.log("TOKEN_INJECT", "DPAPI credential injection SUCCESS")
-                        if (!BattleNetSignIn.KEEP_ST_AFTER_USE) {
-                            BattleNetSignIn.clearWebToken(context)
-                            LauncherDebugLogger.log("TOKEN_INJECT", "KEEP_ST_AFTER_USE is false; cleared saved ST")
-                        } else {
-                            LauncherDebugLogger.log("TOKEN_INJECT", "KEEP_ST_AFTER_USE is true; preserved ST for repeated launch")
-                        }
-                    } else {
-                        LauncherDebugLogger.log("TOKEN_INJECT", "DPAPI credential injection FAILED: output=$injectorOutput")
-                        Timber.e("DPAPI credential injection failed: $injectorOutput")
-                    }
-                } catch (e: Exception) {
-                    LauncherDebugLogger.log("TOKEN_INJECT", "DPAPI credential injection EXCEPTION: ${e.message}")
-                    Timber.e(e, "Exception running bnet_token_injector.exe")
-                } finally {
-                    listOf(cTmp, eTmp).forEach { f ->
-                        if (f.exists()) {
-                            try {
-                                f.writeBytes(ByteArray(f.length().toInt().coerceAtLeast(64)))
-                                f.delete()
-                            } catch (_: Exception) {}
-                        }
-                    }
-                }
-
-                if (!injectorSucceeded) {
-                    val errDetail = if (injectorOutput.isNotBlank()) injectorOutput else "Unknown injector error"
-                    throw IllegalStateException("战网授信凭据注入失败: $errDetail")
-                }
-            }
-
             if (!isExiting.get()) {
                 PluviaApp.events.emit(AndroidEvent.SetBootingSplashText("Launching game...\nStage 5/5: Executing Wow-ARM64.exe..."))
-                LauncherDebugLogger.log("CONTAINER", "Stage 5/5: Executing Wow-ARM64.exe in container")
+                LauncherDebugLogger.log("CONTAINER", "Stage 5/5: Executing guest program in container")
             }
+            LauncherDebugLogger.log("P6_PREUNPACK", "setPreUnpack exit")
         }
 
         val enableGstreamer = container.isGstreamerWorkaround()
@@ -3823,6 +3780,7 @@ private fun setupXEnvironment(
     guestProgramLauncherComponent.envVars = EnvVars().apply { putAll(envVars) }
 
     val gameTerminationCallback = Callback<Int> { status ->
+        LauncherDebugLogger.log("P8_GUEST_TERM", "Guest program terminated: status=$status, splashShowing=${PluviaApp.isBootingSplashShowing}")
         Timber.i("Guest program terminated with status: $status (splash showing: ${PluviaApp.isBootingSplashShowing})")
         if (status != 0 || PluviaApp.isBootingSplashShowing) {
             val gameRoot = java.io.File(GamePath.load(context))
@@ -3830,7 +3788,7 @@ private fun setupXEnvironment(
             val errorMsg = if (!crashLog.isNullOrBlank()) {
                 "Game crashed on launch (exit $status):\n$crashLog"
             } else if (status != 0) {
-                "Wine/Game process exited with error status $status"
+                "启动包装器或游戏异常退出 (exit code: $status)。\n详情请查看日志: _forever_/Logs/launcher_wrapper.log"
             } else {
                 "Wine/Game process exited before window was displayed"
             }
@@ -3869,15 +3827,18 @@ private fun setupXEnvironment(
     }
 
     try {
+        LauncherDebugLogger.log("P8_GUEST_START", "startEnvironmentComponents initiating...")
         environment.startEnvironmentComponents()
-    } catch (e: Exception) {
-        Timber.e(e, "Failed to start environment components, cleaning up")
+        LauncherDebugLogger.log("P8_GUEST_START", "startEnvironmentComponents completed")
+    } catch (t: Throwable) {
+        LauncherDebugLogger.logException("P7_CRASH", "startEnvironmentComponents", t)
+        Timber.e(t, "Failed to start environment components, cleaning up")
         try {
             environment.stopEnvironmentComponents()
         } catch (cleanupEx: Exception) {
             Timber.e(cleanupEx, "Error during environment cleanup")
         }
-        throw e
+        throw t
     }
 
     // put in separate scope since winhandler start method does some network stuff

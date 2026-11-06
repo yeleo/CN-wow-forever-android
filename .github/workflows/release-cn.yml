@@ -33,13 +33,26 @@ jobs:
           chmod +x tools/fetch_components.sh
           ./tools/fetch_components.sh
 
-      - name: Build Battle.net Token Injector (MinGW x86_64)
+      - name: Build WoW ARM64 Launcher Wrapper (llvm-mingw aarch64)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-mingw-w64-x86-64
+          LLVM_MINGW_VER="20261104"
+          LLVM_MINGW_TAR="llvm-mingw-${LLVM_MINGW_VER}-ucrt-ubuntu-22.04-x86_64.tar.xz"
+          LLVM_MINGW_URL="https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_VER}/${LLVM_MINGW_TAR}"
+          EXPECTED_SHA256="919380403de87dca3c581c2053230cd298af5e891286628ba0613b7fed370926"
+
+          echo "Downloading llvm-mingw $LLVM_MINGW_VER..."
+          curl -fL --retry 3 -o "$LLVM_MINGW_TAR" "$LLVM_MINGW_URL"
+          echo "${EXPECTED_SHA256}  ${LLVM_MINGW_TAR}" | sha256sum -c -
+
+          sudo mkdir -p /opt/llvm-mingw
+          sudo tar -xJf "$LLVM_MINGW_TAR" -C /opt/llvm-mingw --strip-components=1
+          rm -f "$LLVM_MINGW_TAR"
+
+          export PATH="/opt/llvm-mingw/bin:$PATH"
           mkdir -p app/src/main/assets
-          x86_64-w64-mingw32-gcc -O2 -s -o app/src/main/assets/bnet_token_injector.exe tools/bnet_token_injector/injector.c -lcrypt32 -ladvapi32
-          ls -la app/src/main/assets/bnet_token_injector.exe
+
+          aarch64-w64-mingw32-clang -O2 -s -static -o app/src/main/assets/Wow-Launcher-ARM64.exe tools/wow_launcher/launcher.c -lcrypt32 -ladvapi32 -lkernel32
+          ls -la app/src/main/assets/Wow-Launcher-ARM64.exe
 
       - name: Build APK (assembleModernRelease)
         run: |

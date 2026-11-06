@@ -208,6 +208,8 @@ fun WoWForeverScreen(
             showStoragePermissionDialog = true
             return
         }
+        val skipInjector = isDebugSkipInjector(context)
+        LauncherDebugLogger.log("P1_LAUNCH", "launchGame entry: region=${region.name}, skipInjector=$skipInjector")
         isLaunching = true
         errorMessage = null
         statusText = "Preparing components..."
@@ -226,15 +228,17 @@ fun WoWForeverScreen(
                 statusText = "Booting into World of Warcraft..."
                 PluviaApp.events.emit(AndroidEvent.SetBootingSplashText("Launching game...\nStarting XServer environment..."))
                 onLaunch(containerId)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: StorageAccessDeniedException) {
-                isLaunching = false
-                statusText = READY_STATUS
-                denyStorageAccess()
-            } catch (e: Exception) {
-                Timber.e(e, "Error launching WoW Forever")
-                errorMessage = e.message ?: "Launch failed"
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                if (t is StorageAccessDeniedException) {
+                    isLaunching = false
+                    statusText = READY_STATUS
+                    denyStorageAccess()
+                    return@launch
+                }
+                LauncherDebugLogger.logException("P7_CRASH", "launchGame", t)
+                Timber.e(t, "Error launching WoW Forever")
+                errorMessage = t.message ?: "Launch failed"
                 statusText = "Launch failed"
                 isLaunching = false
             }
@@ -488,7 +492,20 @@ fun WoWForeverScreen(
                     HorizontalDivider(color = Color(0xFF1E2D44))
                     Spacer(modifier = Modifier.height(12.dp))
 
-                    Text(text = "Target Path: $gamePath", fontSize = 11.sp, color = WowSubtle, maxLines = 2)
+                    var debugSkipInjector by remember { mutableStateOf(isDebugSkipInjector(context)) }
+
+                    Text(
+                        text = if (debugSkipInjector) "Target Path: $gamePath [DEBUG: 跳过注入阶段已开启]" else "Target Path: $gamePath",
+                        fontSize = 11.sp,
+                        color = if (debugSkipInjector) WowGold else WowSubtle,
+                        maxLines = 2,
+                        modifier = Modifier.clickable {
+                            debugSkipInjector = !debugSkipInjector
+                            setDebugSkipInjector(context, debugSkipInjector)
+                            LauncherDebugLogger.log("DEBUG_SWITCH", "Toggled skip_injector to $debugSkipInjector")
+                            app.gamenative.ui.util.SnackbarManager.show("调试开关：跳过注入阶段 = $debugSkipInjector")
+                        }
+                    )
 
                     Spacer(modifier = Modifier.height(6.dp))
 
@@ -1318,7 +1335,13 @@ internal fun fitScreenSize(baseSize: String, windowWidth: Int, windowHeight: Int
     return "${(width / 2).roundToInt() * 2}x${(height / 2).roundToInt() * 2}"
 }
 
+private const val KEY_DEBUG_SKIP_INJECTOR = "debug_skip_injector"
+fun isDebugSkipInjector(context: Context): Boolean = prefs(context).getBoolean(KEY_DEBUG_SKIP_INJECTOR, false)
+fun setDebugSkipInjector(context: Context, skip: Boolean) = prefs(context).edit().putBoolean(KEY_DEBUG_SKIP_INJECTOR, skip).apply()
+
 private fun prepareLaunch(context: Context, gameRoot: File, gpu: GpuProfile, screenSize: String, onStatus: (String) -> Unit): String {
+    val skipInjector = isDebugSkipInjector(context)
+    LauncherDebugLogger.log("P2_PREPARE", "prepareLaunch entry: gameRoot=${gameRoot.path}, screenSize=$screenSize, skipInjector=$skipInjector")
     installBundledComponents(context, onStatus)
 
     check(File(gameRoot, BUILD_INFO).exists()) { "Missing $BUILD_INFO in $gameRoot. Copy it from your WoW install." }
@@ -1337,25 +1360,14 @@ private fun prepareLaunch(context: Context, gameRoot: File, gpu: GpuProfile, scr
         BattleNetSignIn.ST_REGEX.matches(webToken)
 
     val login = BattleNetSignIn.load(context)
-    if (hasValidSt) {
-        val isExpired = BattleNetSignIn.isWebTokenExpired(context)
-        val ageMinutes = (System.currentTimeMillis() - BattleNetSignIn.loadWebTokenTimestamp(context)) / 60000
-        if (isExpired) {
-            Timber.w("Battle.net ST token is older than 60 minutes ($ageMinutes min)")
-            LauncherDebugLogger.log(
-                "TOKEN_INJECT",
-                "Warning: ST token is older than 60 minutes ($ageMinutes min); may fail if expired or single-use (status: unverified single-use behavior)",
-            )
-        } else {
-            LauncherDebugLogger.log(
-                "TOKEN_INJECT",
-                "Valid ST token found (age: $ageMinutes min, len=${webToken!!.length}, prefix=${webToken.take(4)}***)",
-            )
-        }
-        // Skip writing plaintext login.txt and watcher when valid ST token is present (token-driven login)
-        BattleNetSignIn.removeLoginFile(gameRoot)
-        LauncherDebugLogger.log("LOGIN_TXT", "Skipped writing login.txt (ST token-driven login mode)")
+    val useWrapper = currentRegion == GameRegion.CN && !skipInjector && hasValidSt
+
+    if (currentRegion == GameRegion.CN) {
+        // CN region: Completely bypass login.txt writing
+        BattleNetSignIn.removeLoginFile(gameRoot, reason = "CN mode (login.txt bypassed)")
+        LauncherDebugLogger.log("LOGIN_TXT", "CN mode: skipped writing login.txt")
     } else {
+        // Non-CN regions: preserve fallback login.txt if credentials exist
         if (login != null) {
             BattleNetSignIn.writeLoginFile(gameRoot, login)
             BattleNetSignIn.startLoginWatcher(gameRoot)
@@ -1363,6 +1375,8 @@ private fun prepareLaunch(context: Context, gameRoot: File, gpu: GpuProfile, scr
             BattleNetSignIn.removeLoginFile(gameRoot)
         }
     }
+
+    // Ensure Wow-ARM64.exe exists or download it (UNCHANGED)
     if (!arm64Exe.exists()) {
         try {
             WowClientDownloader.download(gameRoot, GameRegion.saved(context)?.name, onStatus)
@@ -1372,9 +1386,45 @@ private fun prepareLaunch(context: Context, gameRoot: File, gpu: GpuProfile, scr
         }
     }
 
+    if (useWrapper) {
+        // Deploy Wow-Launcher-ARM64.exe to gameRoot/_forever_/
+        try {
+            val wrapperFile = File(gameRoot, "$FLAVOR_DIR/Wow-Launcher-ARM64.exe")
+            context.assets.open("Wow-Launcher-ARM64.exe").use { input ->
+                wrapperFile.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+            wrapperFile.setExecutable(true, false)
+            LauncherDebugLogger.log("P2_PREPARE", "Extracted Wow-Launcher-ARM64.exe to ${wrapperFile.path} (${wrapperFile.length()} bytes)")
+        } catch (e: Exception) {
+            Timber.e(e, "Failed to extract Wow-Launcher-ARM64.exe from assets")
+            LauncherDebugLogger.logException("P2_PREPARE", "ExtractWrapper", e)
+        }
+
+        // Stage bnet_token.tmp to fixed location: E:\bnet_token.tmp (/data/data/app.wowforever/storage/bnet_token.tmp)
+        try {
+            val storageDir = File(context.filesDir.parentFile, "storage")
+            if (!storageDir.exists()) storageDir.mkdirs()
+            val eTmp = File(storageDir, "bnet_token.tmp")
+            eTmp.writeText("$webToken\n", Charsets.UTF_8)
+            LauncherDebugLogger.log(
+                "P2_PREPARE",
+                "Staged bnet_token.tmp to ${eTmp.path} (size: ${eTmp.length()} bytes, token len=${webToken!!.length}, prefix=${webToken.take(4)}***)"
+            )
+        } catch (e: Exception) {
+            Timber.e(e, "Failed to stage bnet_token.tmp")
+            LauncherDebugLogger.logException("P2_PREPARE", "StageToken", e)
+        }
+    } else {
+        if (skipInjector) {
+            LauncherDebugLogger.log("P2_PREPARE", "Debug skip injector active: bypassing wrapper, will launch Wow-ARM64.exe directly with -d3d11")
+        }
+    }
+
     onStatus("Configuring ${gpu.label} container...")
     val containerManager = ContainerManager(context)
-    val config = containerConfig(gameRoot, gpu, screenSize, hasValidSt)
+    val config = containerConfig(gameRoot, gpu, screenSize, useWrapper = useWrapper)
     val container = containerManager.getContainerById(CONTAINER_ID)
     if (container == null) {
         onStatus("Creating prefix environment (first boot)...")
@@ -1385,64 +1435,16 @@ private fun prepareLaunch(context: Context, gameRoot: File, gpu: GpuProfile, scr
     }
     check(containerManager.hasContainer(CONTAINER_ID)) { "Container creation failed. Check system storage and logs." }
 
-    val c = containerManager.getContainerById(CONTAINER_ID)
-    if (c != null && hasValidSt && !webToken.isNullOrBlank()) {
-        // 1. Stage bnet_token_injector.exe into container Windows directories
-        try {
-            val wineDriveC = File(c.rootDir, ".wine/drive_c")
-            val winDir = File(wineDriveC, "windows")
-            val sys32Dir = File(winDir, "system32")
-            winDir.mkdirs()
-            sys32Dir.mkdirs()
-            val destExe1 = File(winDir, "bnet_token_injector.exe")
-            val destExe2 = File(sys32Dir, "bnet_token_injector.exe")
-            context.assets.open("bnet_token_injector.exe").use { input ->
-                val bytes = input.readBytes()
-                destExe1.writeBytes(bytes)
-                destExe2.writeBytes(bytes)
-            }
-            destExe1.setExecutable(true, false)
-            destExe2.setExecutable(true, false)
-            LauncherDebugLogger.log("TOKEN_INJECT", "Extracted bnet_token_injector.exe to container (${destExe1.length()} bytes)")
-        } catch (e: Exception) {
-            Timber.e(e, "Failed to extract bnet_token_injector.exe from assets")
-            LauncherDebugLogger.log("TOKEN_INJECT", "Failed to extract bnet_token_injector.exe: ${e.message}")
-        }
-
-        // 2. Stage temporary credential file (C:\bnet_token.tmp & E:\bnet_token.tmp)
-        try {
-            val accountEmail = login?.email ?: BattleNetSignIn.loadAccountEmail(context) ?: ""
-            val tmpContent = "$webToken\n$accountEmail\n"
-
-            // C:\bnet_token.tmp
-            val cTmp = File(c.rootDir, ".wine/drive_c/bnet_token.tmp")
-            cTmp.parentFile?.mkdirs()
-            cTmp.writeText(tmpContent, Charsets.UTF_8)
-
-            // E:\bnet_token.tmp (/data/data/app.wowforever/storage/bnet_token.tmp)
-            val storageDir = File(context.filesDir.parentFile, "storage")
-            if (!storageDir.exists()) storageDir.mkdirs()
-            val eTmp = File(storageDir, "bnet_token.tmp")
-            eTmp.writeText(tmpContent, Charsets.UTF_8)
-
-            LauncherDebugLogger.log(
-                "TOKEN_INJECT",
-                "Staged bnet_token.tmp to C: and E: (len=${webToken.length}, prefix=${webToken.take(4)}***, hasAccount=${accountEmail.isNotEmpty()})",
-            )
-        } catch (e: Exception) {
-            Timber.e(e, "Failed to stage bnet_token.tmp")
-            LauncherDebugLogger.log("TOKEN_INJECT", "Failed to stage bnet_token.tmp: ${e.message}")
-        }
-    }
-
-    LauncherDebugLogger.log("CONTAINER", "prepareLaunch completed (containerId=$CONTAINER_ID, hasValidSt=$hasValidSt)")
+    LauncherDebugLogger.log("P2_PREPARE", "prepareLaunch completed (containerId=$CONTAINER_ID, useWrapper=$useWrapper, skipInjector=$skipInjector)")
     return CONTAINER_ID
 }
 
-private fun containerConfig(gameRoot: File, gpu: GpuProfile, screenSize: String, hasValidSt: Boolean): JSONObject {
+private fun containerConfig(gameRoot: File, gpu: GpuProfile, screenSize: String, useWrapper: Boolean): JSONObject {
     val samsungEnv = if (Build.MANUFACTURER.equals("samsung", ignoreCase = true)) " FD_DEV_FEATURES=enable_tp_ubwc_flag_hint=1" else ""
     val envVars = "WRAPPER_MAX_IMAGE_COUNT=0 ZINK_DESCRIPTORS=lazy ZINK_DEBUG=compact,deck_emu MESA_SHADER_CACHE_DISABLE=false MESA_SHADER_CACHE_MAX_SIZE=512MB mesa_glthread=true WINEESYNC=0 MESA_VK_WSI_PRESENT_MODE=mailbox TU_DEBUG=${gpu.tuDebug} VKD3D_SHADER_MODEL=6_0 PULSE_LATENCY_MSEC=144$samsungEnv"
-    val execArgs = if (hasValidSt) "-d3d11 -launcherlogin -uid wowf" else "-d3d11"
+    val targetExe = if (useWrapper) "G:\\$FLAVOR_DIR\\Wow-Launcher-ARM64.exe" else "G:\\$FLAVOR_DIR\\$EXE_NAME"
+    val execArgs = if (useWrapper) "" else "-d3d11"
+
     return JSONObject().apply {
         put("id", CONTAINER_ID)
         put("name", "WoW Forever")
@@ -1458,7 +1460,7 @@ private fun containerConfig(gameRoot: File, gpu: GpuProfile, screenSize: String,
         put("containerVariant", "bionic")
         put("fexcoreVersion", "2609-0")
         put("drives", "D:/storage/emulated/0/DownloadE:/data/data/app.wowforever/storageG:${gameRoot.path}")
-        put("executablePath", "G:\\$FLAVOR_DIR\\$EXE_NAME")
+        put("executablePath", targetExe)
         put("execArgs", execArgs)
         put("showFPS", true)
         // Keep running in the background: a suspended client drops its Battle.net connection, e.g. while the

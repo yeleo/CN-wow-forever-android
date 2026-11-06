@@ -92,11 +92,22 @@ object LauncherDebugLogger {
         val line = "[$timestamp] [$tag] $message\n"
         try {
             val file = getLogFile()
-            file.appendText(line)
+            java.io.FileOutputStream(file, true).use { fos ->
+                val bytes = line.toByteArray(Charsets.UTF_8)
+                fos.write(bytes)
+                fos.flush()
+                fos.fd.sync()
+            }
         } catch (e: Exception) {
             Timber.w(e, "Failed to write launcher debug log")
         }
         Timber.i("[$tag] $message")
+    }
+
+    fun logException(tag: String, stage: String, t: Throwable) {
+        val stackTrace = t.stackTrace.take(30).joinToString("\n    at ") { it.toString() }
+        val msg = "FATAL EXCEPTION in $stage: ${t.javaClass.name}: ${t.message}\n    at $stackTrace"
+        log(tag, msg)
     }
 }
 
@@ -247,6 +258,7 @@ object BattleNetSignIn {
     val ST_REGEX = Regex("""^CN-[0-9a-fA-F]{32}-\d+$""")
     const val ST_EXPIRATION_MINUTES = 60L
     var KEEP_ST_AFTER_USE = true
+    const val ENABLE_ACCOUNT_PROMPT_DIALOG = false
 
     fun hasCredentials(context: Context): Boolean = load(context) != null
 
@@ -531,9 +543,13 @@ fun BattleNetWebAuthDialog(
                                             BattleNetSignIn.saveWebToken(context, token)
                                             hasCapturedToken = true
                                             SnackbarManager.show("已成功捕获国服战网授信 Token！")
-                                            val saved = BattleNetSignIn.load(context)
-                                            if (saved == null || saved.email.isBlank()) {
-                                                showAccountPrompt = true
+                                            if (BattleNetSignIn.ENABLE_ACCOUNT_PROMPT_DIALOG) {
+                                                val saved = BattleNetSignIn.load(context)
+                                                if (saved == null || saved.email.isBlank()) {
+                                                    showAccountPrompt = true
+                                                } else {
+                                                    onDismiss()
+                                                }
                                             } else {
                                                 onDismiss()
                                             }

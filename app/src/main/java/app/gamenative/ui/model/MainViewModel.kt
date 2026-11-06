@@ -20,6 +20,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import java.io.File
 import javax.inject.Inject
 import app.gamenative.ui.screen.wow.GamePath
+import app.gamenative.ui.screen.wow.LauncherDebugLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -181,6 +182,7 @@ class MainViewModel @Inject constructor(
     }
 
     fun launchApp(context: Context, appId: String) {
+        LauncherDebugLogger.log("P4_VM_LAUNCH", "MainViewModel launchApp called: appId=$appId")
         gamePlayedThisSession = true
         PrefManager.hasAttemptedGameLaunch = true
         launchAppJob?.cancel()
@@ -197,6 +199,7 @@ class MainViewModel @Inject constructor(
             if (!isActive) return@launch
             apiJob.await()
             if (!isActive) return@launch
+            LauncherDebugLogger.log("P4_VM_LAUNCH", "MainViewModel sending MainUiEvent.LaunchApp")
             _uiEvent.send(MainUiEvent.LaunchApp)
         }
     }

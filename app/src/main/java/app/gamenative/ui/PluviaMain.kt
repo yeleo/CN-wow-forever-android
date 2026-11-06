@@ -66,6 +66,7 @@ import app.gamenative.ui.model.MainViewModel
 import app.gamenative.ui.screen.PluviaScreen
 import app.gamenative.ui.screen.wow.BattleNetSignIn
 import app.gamenative.ui.screen.wow.GamePath
+import app.gamenative.ui.screen.wow.LauncherDebugLogger
 import app.gamenative.ui.screen.wow.WoWForeverScreen
 import app.gamenative.ui.screen.wow.WoWLauncherState
 import app.gamenative.ui.screen.xserver.XServerScreen
@@ -316,6 +317,7 @@ fun PluviaMain(
                 composable(route = PluviaScreen.WoWLauncher.route) {
                     WoWForeverScreen(
                         onLaunch = { appId ->
+                            LauncherDebugLogger.log("P3_ROUTE", "WoWForeverScreen onLaunch called with appId=$appId")
                             viewModel.setLaunchedAppId(appId)
                             viewModel.setOffline(true)
                             preLaunchJob?.cancel()
@@ -326,7 +328,10 @@ fun PluviaMain(
                                 setLoadingProgress = viewModel::setLoadingDialogProgress,
                                 setLoadingMessage = viewModel::setLoadingDialogMessage,
                                 setMessageDialogState = { msgDialogState = it },
-                                onSuccess = viewModel::launchApp,
+                                onSuccess = { ctx, id ->
+                                    LauncherDebugLogger.log("P3_ROUTE", "preLaunchApp onSuccess, calling viewModel.launchApp")
+                                    viewModel.launchApp(ctx, id)
+                                },
                             )
                         },
                     )
