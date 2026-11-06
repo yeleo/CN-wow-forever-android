@@ -7,6 +7,7 @@ import android.view.WindowManager
 import java.util.Locale
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -24,6 +25,7 @@ import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -43,6 +45,7 @@ import androidx.lifecycle.compose.LifecycleResumeEffect
 import app.gamenative.BuildConfig
 import app.gamenative.PluviaApp
 import app.gamenative.events.AndroidEvent
+import com.winlator.core.WineRegistryEditor
 import app.gamenative.ui.screen.wow.WowClientDownloader.BUILD_INFO
 import app.gamenative.ui.screen.wow.WowClientDownloader.EXE_NAME
 import app.gamenative.ui.screen.wow.WowClientDownloader.FLAVOR_DIR
@@ -103,6 +106,7 @@ fun WoWForeverScreen(
     var region by remember(gamePath, files) { mutableStateOf(GameRegion.current(context, gamePath)) }
     var resolution by remember { mutableStateOf(RenderResolution.current(context, gpu.screenSize)) }
     var showLoginDialog by remember { mutableStateOf(false) }
+    var showWebAuthDialog by remember { mutableStateOf(false) }
     var statusText by remember { mutableStateOf(READY_STATUS) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var showStoragePermissionDialog by remember { mutableStateOf(false) }
@@ -243,7 +247,9 @@ fun WoWForeverScreen(
         checkFiles()
         isLaunching = false
         statusText = READY_STATUS
-        BattleNetSignIn.removeLoginFile(File(gamePath))
+        if (!BattleNetSignIn.hasCredentials(context)) {
+            BattleNetSignIn.removeLoginFile(File(gamePath))
+        }
         if (versionStatus == null && !WoWLauncherState.shouldAutoLaunch) {
             checkVersionStatus()
         }
@@ -263,11 +269,15 @@ fun WoWForeverScreen(
     DisposableEffect(Unit) {
         val reset: (Any) -> Unit = {
             resetLaunch()
-            BattleNetSignIn.removeLoginFile(File(gamePath))
+            if (!BattleNetSignIn.hasCredentials(context)) {
+                BattleNetSignIn.removeLoginFile(File(gamePath))
+            }
         }
         val onLaunchFailed: (AndroidEvent.GameLaunchFailed) -> Unit = { event ->
             resetLaunch()
-            BattleNetSignIn.removeLoginFile(File(gamePath))
+            if (!BattleNetSignIn.hasCredentials(context)) {
+                BattleNetSignIn.removeLoginFile(File(gamePath))
+            }
             errorMessage = event.message
             statusText = "Launch failed"
         }
@@ -401,8 +411,7 @@ fun WoWForeverScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .verticalScroll(scrollState),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.SpaceBetween
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Spacer(modifier = Modifier.height(20.dp))
@@ -481,7 +490,12 @@ fun WoWForeverScreen(
 
                     Text(text = "Target Path: $gamePath", fontSize = 11.sp, color = WowSubtle, maxLines = 2)
 
-                    Row {
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
                         OptionMenu("Region: ${region.label}", Icons.Default.Public, GameRegion.entries, region, { it.label }, !isLaunching) {
                             GameRegion.save(context, it)
                             region = it
@@ -656,10 +670,85 @@ fun WoWForeverScreen(
                         )
                     }
 
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // 1. Configure Login / Update Login & Forget Saved
+                    if (!hasSavedLogin) {
+                        OutlinedButton(
+                            onClick = { showLoginDialog = true },
+                            enabled = !isLaunching && !isUpdating,
+                            modifier = Modifier
+                                .fillMaxWidth(0.85f)
+                                .height(46.dp),
+                            shape = RoundedCornerShape(14.dp),
+                            border = BorderStroke(1.dp, WowGold.copy(alpha = 0.8f))
+                        ) {
+                            Icon(Icons.Default.Key, contentDescription = null, modifier = Modifier.size(18.dp), tint = WowGold)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(text = "Configure Login (战网账号密码)", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = WowGold)
+                        }
+                    } else {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(0.85f),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedButton(
+                                onClick = { showLoginDialog = true },
+                                enabled = !isLaunching && !isUpdating,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(44.dp),
+                                shape = RoundedCornerShape(12.dp),
+                                border = BorderStroke(1.dp, Color(0xFF38BDF8).copy(alpha = 0.8f))
+                            ) {
+                                Icon(Icons.Default.Key, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color(0xFF38BDF8))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Update Login", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF38BDF8))
+                            }
+                            OutlinedButton(
+                                onClick = {
+                                    BattleNetSignIn.forget(context)
+                                    BattleNetSignIn.removeLoginFile(File(gamePath))
+                                    hasSavedLogin = false
+                                    checkFiles()
+                                },
+                                enabled = !isLaunching && !isUpdating,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(44.dp),
+                                shape = RoundedCornerShape(12.dp),
+                                border = BorderStroke(1.dp, WowError.copy(alpha = 0.6f))
+                            ) {
+                                Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp), tint = WowError)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Forget Saved", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = WowError)
+                            }
+                        }
+                    }
+
                     Spacer(modifier = Modifier.height(10.dp))
 
+                    // 2. Fix 14400 / 国服网页登录授信
+                    OutlinedButton(
+                        onClick = { showWebAuthDialog = true },
+                        enabled = !isLaunching && !isUpdating,
+                        modifier = Modifier
+                            .fillMaxWidth(0.85f)
+                            .height(44.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, Color(0xFFF59E0B).copy(alpha = 0.8f))
+                    ) {
+                        Icon(Icons.Default.Security, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color(0xFFF59E0B))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Fix 14400 / 国服网页登录授信", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFFF59E0B))
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // 3. Utility actions
                     Row(
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         LinkButton("Refresh Status", Icons.Default.Refresh) {
@@ -669,19 +758,6 @@ fun WoWForeverScreen(
                         }
                         if (!files.needsInstall) {
                             LinkButton("Change Location", Icons.Default.FolderOpen) { folderPicker.launch(null) }
-                        }
-                        LinkButton(
-                            text = if (hasSavedLogin) "Update Login" else "Configure Login",
-                            icon = Icons.Default.Key,
-                        ) {
-                            showLoginDialog = true
-                        }
-                        if (hasSavedLogin) {
-                            LinkButton("Forget Saved Login", Icons.Default.Delete) {
-                                BattleNetSignIn.forget(context)
-                                BattleNetSignIn.removeLoginFile(File(gamePath))
-                                hasSavedLogin = false
-                            }
                         }
                     }
                 }
@@ -698,7 +774,14 @@ fun WoWForeverScreen(
                 showLoginDialog = false
                 BattleNetSignIn.save(context, login)
                 hasSavedLogin = true
+                checkFiles()
             },
+        )
+    }
+
+    if (showWebAuthDialog) {
+        BattleNetWebAuthDialog(
+            onDismiss = { showWebAuthDialog = false },
         )
     }
 
@@ -1104,10 +1187,14 @@ private fun PrimaryButton(text: String, icon: ImageVector, enabled: Boolean, onC
 
 @Composable
 private fun LinkButton(text: String, icon: ImageVector, enabled: Boolean = true, onClick: () -> Unit) {
-    TextButton(onClick = onClick, enabled = enabled) {
+    TextButton(
+        onClick = onClick,
+        enabled = enabled,
+        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
+    ) {
         Icon(icon, contentDescription = null, modifier = Modifier.size(16.dp), tint = WowMuted)
         Spacer(modifier = Modifier.width(6.dp))
-        Text(text, fontSize = 12.sp, color = WowMuted)
+        Text(text, fontSize = 12.sp, color = WowMuted, maxLines = 1)
     }
 }
 
@@ -1245,6 +1332,25 @@ private fun prepareLaunch(context: Context, gameRoot: File, gpu: GpuProfile, scr
         container.saveData()
     }
     check(containerManager.hasContainer(CONTAINER_ID)) { "Container creation failed. Check system storage and logs." }
+
+    val c = containerManager.getContainerById(CONTAINER_ID)
+    if (c != null) {
+        val token = BattleNetSignIn.loadWebToken(context)
+        if (!token.isNullOrBlank()) {
+            val userReg = File(c.rootDir, ".wine/user.reg")
+            if (userReg.exists()) {
+                try {
+                    WineRegistryEditor(userReg).use { reg ->
+                        reg.setStringValue("Software\\Blizzard Entertainment\\Battle.net\\Launch Options\\wowf", "WEB_TOKEN", token)
+                    }
+                    Timber.i("Wrote WEB_TOKEN to Wine registry successfully")
+                } catch (e: Exception) {
+                    Timber.w(e, "Failed to write WEB_TOKEN to Wine registry")
+                }
+            }
+        }
+    }
+
     return CONTAINER_ID
 }
 

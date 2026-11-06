@@ -91,6 +91,7 @@ import app.gamenative.PrefManager
 import app.gamenative.data.GyroSettings
 import app.gamenative.data.ShooterModeConfig
 import app.gamenative.events.AndroidEvent
+import app.gamenative.ui.screen.wow.BattleNetSignIn
 import app.gamenative.ui.screen.wow.GamePath
 import app.gamenative.ui.enums.Orientation
 import java.util.EnumSet
@@ -3658,6 +3659,11 @@ private fun setupXEnvironment(
         envVars.remove("DXVK_FRAME_RATE")
         envVars.remove("VKD3D_FRAME_RATE")
         if (!envVars.has("WINEESYNC")) envVars.put("WINEESYNC", "1")
+
+        val webToken = BattleNetSignIn.loadWebToken(context)
+        if (!webToken.isNullOrBlank()) {
+            envVars.put("WEB_TOKEN", webToken)
+        }
 
         val graphicsDriverConfig = KeyValueSet(container.getGraphicsDriverConfig())
         if (graphicsDriverConfig.get("version").lowercase(Locale.getDefault()).contains("gen8")) {
