@@ -730,6 +730,13 @@ fun WoWForeverScreen(
                     Spacer(modifier = Modifier.height(10.dp))
 
                     // 2. Fix 14400 / 国服网页登录授信
+                    val savedSt = remember(showWebAuthDialog) { BattleNetSignIn.loadWebToken(context) }
+                    val stAgeMin = remember(showWebAuthDialog) {
+                        val ts = BattleNetSignIn.loadWebTokenTimestamp(context)
+                        if (ts > 0L) (System.currentTimeMillis() - ts) / 60000 else -1L
+                    }
+                    val isStExpired = remember(showWebAuthDialog) { BattleNetSignIn.isWebTokenExpired(context) }
+
                     OutlinedButton(
                         onClick = { showWebAuthDialog = true },
                         enabled = !isLaunching && !isUpdating,
@@ -741,7 +748,26 @@ fun WoWForeverScreen(
                     ) {
                         Icon(Icons.Default.Security, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color(0xFFF59E0B))
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Fix 14400 / 国服网页登录授信", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFFF59E0B))
+                        Text(
+                            text = if (savedSt != null) "Fix 14400 / 重新授信 (已保存)" else "Fix 14400 / 国服网页登录授信",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFFF59E0B)
+                        )
+                    }
+                    if (savedSt != null && stAgeMin >= 0) {
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = if (isStExpired) {
+                                "⚠ 授信已达 ${stAgeMin} 分钟（超过 60 分钟，可能已失效，建议重新授信）"
+                            } else {
+                                "✓ 授信有效（${stAgeMin} 分钟前获取，Token: ${savedSt.take(4)}***）"
+                            },
+                            fontSize = 10.sp,
+                            color = if (isStExpired) WowError else Color(0xFF48BB78),
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.fillMaxWidth(0.85f)
+                        )
                     }
 
                     Spacer(modifier = Modifier.height(10.dp))
@@ -1304,12 +1330,38 @@ private fun prepareLaunch(context: Context, gameRoot: File, gpu: GpuProfile, scr
     }
 
     val arm64Exe = File(gameRoot, "$FLAVOR_DIR/$EXE_NAME")
+    val currentRegion = GameRegion.saved(context) ?: GameRegion.current(context, gameRoot.path)
+    val webToken = BattleNetSignIn.loadWebToken(context)
+    val hasValidSt = currentRegion == GameRegion.CN &&
+        !webToken.isNullOrBlank() &&
+        BattleNetSignIn.ST_REGEX.matches(webToken)
+
     val login = BattleNetSignIn.load(context)
-    if (login != null) {
-        BattleNetSignIn.writeLoginFile(gameRoot, login)
-        BattleNetSignIn.startLoginWatcher(gameRoot)
-    } else {
+    if (hasValidSt) {
+        val isExpired = BattleNetSignIn.isWebTokenExpired(context)
+        val ageMinutes = (System.currentTimeMillis() - BattleNetSignIn.loadWebTokenTimestamp(context)) / 60000
+        if (isExpired) {
+            Timber.w("Battle.net ST token is older than 60 minutes ($ageMinutes min)")
+            LauncherDebugLogger.log(
+                "TOKEN_INJECT",
+                "Warning: ST token is older than 60 minutes ($ageMinutes min); may fail if expired or single-use (status: unverified single-use behavior)",
+            )
+        } else {
+            LauncherDebugLogger.log(
+                "TOKEN_INJECT",
+                "Valid ST token found (age: $ageMinutes min, len=${webToken!!.length}, prefix=${webToken.take(4)}***)",
+            )
+        }
+        // Skip writing plaintext login.txt and watcher when valid ST token is present (token-driven login)
         BattleNetSignIn.removeLoginFile(gameRoot)
+        LauncherDebugLogger.log("LOGIN_TXT", "Skipped writing login.txt (ST token-driven login mode)")
+    } else {
+        if (login != null) {
+            BattleNetSignIn.writeLoginFile(gameRoot, login)
+            BattleNetSignIn.startLoginWatcher(gameRoot)
+        } else {
+            BattleNetSignIn.removeLoginFile(gameRoot)
+        }
     }
     if (!arm64Exe.exists()) {
         try {
@@ -1322,7 +1374,7 @@ private fun prepareLaunch(context: Context, gameRoot: File, gpu: GpuProfile, scr
 
     onStatus("Configuring ${gpu.label} container...")
     val containerManager = ContainerManager(context)
-    val config = containerConfig(gameRoot, gpu, screenSize)
+    val config = containerConfig(gameRoot, gpu, screenSize, hasValidSt)
     val container = containerManager.getContainerById(CONTAINER_ID)
     if (container == null) {
         onStatus("Creating prefix environment (first boot)...")
@@ -1334,29 +1386,63 @@ private fun prepareLaunch(context: Context, gameRoot: File, gpu: GpuProfile, scr
     check(containerManager.hasContainer(CONTAINER_ID)) { "Container creation failed. Check system storage and logs." }
 
     val c = containerManager.getContainerById(CONTAINER_ID)
-    if (c != null) {
-        val token = BattleNetSignIn.loadWebToken(context)
-        if (!token.isNullOrBlank()) {
-            val userReg = File(c.rootDir, ".wine/user.reg")
-            if (userReg.exists()) {
-                try {
-                    WineRegistryEditor(userReg).use { reg ->
-                        reg.setStringValue("Software\\Blizzard Entertainment\\Battle.net\\Launch Options\\wowf", "WEB_TOKEN", token)
-                    }
-                    Timber.i("Wrote WEB_TOKEN to Wine registry successfully")
-                } catch (e: Exception) {
-                    Timber.w(e, "Failed to write WEB_TOKEN to Wine registry")
-                }
+    if (c != null && hasValidSt && !webToken.isNullOrBlank()) {
+        // 1. Stage bnet_token_injector.exe into container Windows directories
+        try {
+            val wineDriveC = File(c.rootDir, ".wine/drive_c")
+            val winDir = File(wineDriveC, "windows")
+            val sys32Dir = File(winDir, "system32")
+            winDir.mkdirs()
+            sys32Dir.mkdirs()
+            val destExe1 = File(winDir, "bnet_token_injector.exe")
+            val destExe2 = File(sys32Dir, "bnet_token_injector.exe")
+            context.assets.open("bnet_token_injector.exe").use { input ->
+                val bytes = input.readBytes()
+                destExe1.writeBytes(bytes)
+                destExe2.writeBytes(bytes)
             }
+            destExe1.setExecutable(true, false)
+            destExe2.setExecutable(true, false)
+            LauncherDebugLogger.log("TOKEN_INJECT", "Extracted bnet_token_injector.exe to container (${destExe1.length()} bytes)")
+        } catch (e: Exception) {
+            Timber.e(e, "Failed to extract bnet_token_injector.exe from assets")
+            LauncherDebugLogger.log("TOKEN_INJECT", "Failed to extract bnet_token_injector.exe: ${e.message}")
+        }
+
+        // 2. Stage temporary credential file (C:\bnet_token.tmp & E:\bnet_token.tmp)
+        try {
+            val accountEmail = login?.account ?: BattleNetSignIn.loadAccountEmail(context) ?: ""
+            val tmpContent = "$webToken\n$accountEmail\n"
+
+            // C:\bnet_token.tmp
+            val cTmp = File(c.rootDir, ".wine/drive_c/bnet_token.tmp")
+            cTmp.parentFile?.mkdirs()
+            cTmp.writeText(tmpContent, Charsets.UTF_8)
+
+            // E:\bnet_token.tmp (/data/data/app.wowforever/storage/bnet_token.tmp)
+            val storageDir = File(context.filesDir.parentFile, "storage")
+            if (!storageDir.exists()) storageDir.mkdirs()
+            val eTmp = File(storageDir, "bnet_token.tmp")
+            eTmp.writeText(tmpContent, Charsets.UTF_8)
+
+            LauncherDebugLogger.log(
+                "TOKEN_INJECT",
+                "Staged bnet_token.tmp to C: and E: (len=${webToken.length}, prefix=${webToken.take(4)}***, hasAccount=${accountEmail.isNotEmpty()})",
+            )
+        } catch (e: Exception) {
+            Timber.e(e, "Failed to stage bnet_token.tmp")
+            LauncherDebugLogger.log("TOKEN_INJECT", "Failed to stage bnet_token.tmp: ${e.message}")
         }
     }
 
+    LauncherDebugLogger.log("CONTAINER", "prepareLaunch completed (containerId=$CONTAINER_ID, hasValidSt=$hasValidSt)")
     return CONTAINER_ID
 }
 
-private fun containerConfig(gameRoot: File, gpu: GpuProfile, screenSize: String): JSONObject {
+private fun containerConfig(gameRoot: File, gpu: GpuProfile, screenSize: String, hasValidSt: Boolean): JSONObject {
     val samsungEnv = if (Build.MANUFACTURER.equals("samsung", ignoreCase = true)) " FD_DEV_FEATURES=enable_tp_ubwc_flag_hint=1" else ""
     val envVars = "WRAPPER_MAX_IMAGE_COUNT=0 ZINK_DESCRIPTORS=lazy ZINK_DEBUG=compact,deck_emu MESA_SHADER_CACHE_DISABLE=false MESA_SHADER_CACHE_MAX_SIZE=512MB mesa_glthread=true WINEESYNC=0 MESA_VK_WSI_PRESENT_MODE=mailbox TU_DEBUG=${gpu.tuDebug} VKD3D_SHADER_MODEL=6_0 PULSE_LATENCY_MSEC=144$samsungEnv"
+    val execArgs = if (hasValidSt) "-d3d11 -launcherlogin -uid wowf" else "-d3d11"
     return JSONObject().apply {
         put("id", CONTAINER_ID)
         put("name", "WoW Forever")
@@ -1373,7 +1459,7 @@ private fun containerConfig(gameRoot: File, gpu: GpuProfile, screenSize: String)
         put("fexcoreVersion", "2609-0")
         put("drives", "D:/storage/emulated/0/DownloadE:/data/data/app.wowforever/storageG:${gameRoot.path}")
         put("executablePath", "G:\\$FLAVOR_DIR\\$EXE_NAME")
-        put("execArgs", "-d3d11")
+        put("execArgs", execArgs)
         put("showFPS", true)
         // Keep running in the background: a suspended client drops its Battle.net connection, e.g. while the
         // player fetches an authenticator code from another app.

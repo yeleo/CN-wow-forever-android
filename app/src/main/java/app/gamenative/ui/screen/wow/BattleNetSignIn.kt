@@ -2,10 +2,12 @@ package app.gamenative.ui.screen.wow
 
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.net.Uri
 import android.util.Base64
 import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -61,11 +63,42 @@ import androidx.compose.ui.window.DialogProperties
 import app.gamenative.Crypto
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import timber.log.Timber
 import java.io.File
+
+object LauncherDebugLogger {
+    private val dateFormat = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US)
+    private var customLogDir: File? = null
+
+    fun setLogDirectory(dir: File) {
+        customLogDir = dir
+    }
+
+    private fun getLogFile(): File {
+        val baseDir = customLogDir ?: File(android.os.Environment.getExternalStorageDirectory(), "WoW Forever/${WowClientDownloader.FLAVOR_DIR}/Logs")
+        if (!baseDir.exists()) {
+            baseDir.mkdirs()
+        }
+        return File(baseDir, "launcher_login_debug.log")
+    }
+
+    @Synchronized
+    fun log(tag: String, message: String) {
+        val timestamp = dateFormat.format(java.util.Date())
+        val line = "[$timestamp] [$tag] $message\n"
+        try {
+            val file = getLogFile()
+            file.appendText(line)
+        } catch (e: Exception) {
+            Timber.w(e, "Failed to write launcher debug log")
+        }
+        Timber.i("[$tag] $message")
+    }
+}
 
 object BattleNetSignIn {
     data class Login(val email: String, val password: String)
@@ -94,54 +127,112 @@ object BattleNetSignIn {
 
     fun writeLoginFile(gameRoot: File, login: Login) {
         try {
-            val file = File(File(gameRoot, WowClientDownloader.FLAVOR_DIR), "login.txt")
+            val flavorDir = File(gameRoot, WowClientDownloader.FLAVOR_DIR)
+            val file = File(flavorDir, "login.txt")
             file.parentFile?.mkdirs()
-            file.writeText("${login.email}\n${login.password}\n")
+            val text = "${login.email}\n${login.password}\n"
+            file.writeText(text)
+            val logsDir = File(flavorDir, "Logs")
+            logsDir.mkdirs()
+            LauncherDebugLogger.setLogDirectory(logsDir)
+            LauncherDebugLogger.log("LOGIN_TXT", "login.txt written (size: ${text.toByteArray().size} bytes, flavorDir: ${WowClientDownloader.FLAVOR_DIR})")
         } catch (e: Exception) {
             Timber.e(e, "Failed to write login.txt")
+            LauncherDebugLogger.log("LOGIN_TXT", "Failed to write login.txt: ${e.message}")
         }
     }
 
     // Also clears a login.txt left in the beta folder, which the full release no longer reads.
-    fun removeLoginFile(gameRoot: File) {
+    fun removeLoginFile(gameRoot: File, reason: String = "manual/exit") {
         listOf(WowClientDownloader.FLAVOR_DIR, WowClientDownloader.LEGACY_FLAVOR_DIR).forEach { flavorDir ->
             try {
                 val file = File(File(gameRoot, flavorDir), "login.txt")
                 if (file.exists()) {
-                    file.writeBytes(ByteArray(file.length().coerceAtMost(4096).toInt()))
+                    val originalSize = file.length()
+                    file.writeBytes(ByteArray(originalSize.coerceAtMost(4096).toInt()))
                     file.delete()
+                    LauncherDebugLogger.log(
+                        "LOGIN_TXT",
+                        "login.txt wiped and deleted (flavorDir: $flavorDir, size: $originalSize bytes, reason: $reason)"
+                    )
                 }
             } catch (e: Exception) {
                 Timber.e(e, "Failed to remove login.txt")
+                LauncherDebugLogger.log("LOGIN_TXT", "Failed to remove login.txt: ${e.message}")
             }
         }
     }
 
     fun removeLoginFile(context: Context) {
+        watcherJob?.cancel()
         try {
             val path = GamePath.load(context)
-            removeLoginFile(File(path))
+            removeLoginFile(File(path), reason = "app event/shutdown")
         } catch (_: Exception) {}
         try {
             val defaultPath = File(android.os.Environment.getExternalStorageDirectory(), "WoW Forever")
-            removeLoginFile(defaultPath)
+            removeLoginFile(defaultPath, reason = "app event/shutdown")
         } catch (_: Exception) {}
     }
 
+    private var watcherJob: Job? = null
+
     fun startLoginWatcher(gameRoot: File) {
-        CoroutineScope(Dispatchers.IO).launch {
-            val hotfixLog = File(File(gameRoot, WowClientDownloader.FLAVOR_DIR), "Logs/Hotfix.log")
-            hotfixLog.delete()
-            // WoW client reads login.txt on early startup. Wipe and delete within 25s to avoid exposing credentials.
-            val deadline = System.currentTimeMillis() + 25_000L
-            while (isActive && System.currentTimeMillis() < deadline) {
-                delay(1000L)
-                if (hotfixLog.exists() && hotfixLog.length() > 50_000L) {
-                    removeLoginFile(gameRoot)
-                    return@launch
+        watcherJob?.cancel()
+        val logsDir = File(gameRoot, "${WowClientDownloader.FLAVOR_DIR}/Logs")
+        logsDir.mkdirs()
+        LauncherDebugLogger.setLogDirectory(logsDir)
+        LauncherDebugLogger.log("LOGIN_TXT", "startLoginWatcher initiated (deadline: 180s)")
+
+        watcherJob = CoroutineScope(Dispatchers.IO).launch {
+            val hotfixLog = File(logsDir, "Hotfix.log")
+            val connectionLog = File(logsDir, "connection.log")
+
+            // Rotate existing connection.log so we only detect events from this new launch session
+            if (connectionLog.exists() && connectionLog.length() > 0) {
+                try {
+                    val oldLog = File(logsDir, "connection.old.log")
+                    if (oldLog.exists()) oldLog.delete()
+                    connectionLog.renameTo(oldLog)
+                    LauncherDebugLogger.log("LOGIN_TXT", "Rotated previous connection.log to connection.old.log")
+                } catch (e: Exception) {
+                    Timber.w(e, "Failed to rotate connection.log")
                 }
             }
-            removeLoginFile(gameRoot)
+
+            // Fallback deadline: 180 seconds (3 minutes) as required
+            val deadline = System.currentTimeMillis() + 180_000L
+            var detectedReason: String? = null
+
+            while (isActive && System.currentTimeMillis() < deadline) {
+                delay(1000L)
+
+                // 1. Check connection.log for Battle.net login request
+                if (connectionLog.exists() && connectionLog.length() > 0) {
+                    try {
+                        val text = connectionLog.readText()
+                        if (text.contains("Battle.net logon requested") || text.contains("Glue login started")) {
+                            detectedReason = "detected 'Battle.net logon requested' in connection.log"
+                            break
+                        }
+                    } catch (_: Exception) {}
+                }
+
+                // 2. Check Hotfix.log for asset streaming completion
+                if (hotfixLog.exists() && hotfixLog.length() > 50_000L) {
+                    detectedReason = "Hotfix.log exceeded 50KB"
+                    break
+                }
+            }
+
+            if (detectedReason != null) {
+                LauncherDebugLogger.log("LOGIN_TXT", "Game consumed login: $detectedReason. Waiting 2s before wipe...")
+                delay(2000L)
+                removeLoginFile(gameRoot, reason = detectedReason)
+            } else {
+                LauncherDebugLogger.log("LOGIN_TXT", "Watcher deadline reached (180s). Wiping login.txt...")
+                removeLoginFile(gameRoot, reason = "fallback timeout (180s)")
+            }
         }
     }
 
@@ -151,18 +242,44 @@ object BattleNetSignIn {
     private const val KEY_EMAIL = "email"
     private const val KEY_PASSWORD = "password"
     private const val KEY_WEB_TOKEN = "web_token"
+    private const val KEY_WEB_TOKEN_TS = "web_token_ts"
+
+    const val ST_EXPIRATION_MINUTES = 60L
+    var KEEP_ST_AFTER_USE = true
 
     fun hasCredentials(context: Context): Boolean = load(context) != null
 
     fun loadWebToken(context: Context): String? =
         prefs(context).getString(KEY_WEB_TOKEN, null)
 
+    fun loadWebTokenTimestamp(context: Context): Long =
+        prefs(context).getLong(KEY_WEB_TOKEN_TS, 0L)
+
+    fun isWebTokenExpired(context: Context): Boolean {
+        val ts = loadWebTokenTimestamp(context)
+        if (ts <= 0L) return true
+        val ageMin = (System.currentTimeMillis() - ts) / 60000L
+        return ageMin >= ST_EXPIRATION_MINUTES
+    }
+
     fun saveWebToken(context: Context, token: String) {
-        prefs(context).edit().putString(KEY_WEB_TOKEN, token).apply()
+        val ts = System.currentTimeMillis()
+        prefs(context).edit()
+            .putString(KEY_WEB_TOKEN, token)
+            .putLong(KEY_WEB_TOKEN_TS, ts)
+            .apply()
+        LauncherDebugLogger.log(
+            "WEB_AUTH",
+            "Saved ST token to SharedPreferences (length=${token.length}, prefix=${token.take(4)}***, captureTs=$ts)",
+        )
     }
 
     fun clearWebToken(context: Context) {
-        prefs(context).edit().remove(KEY_WEB_TOKEN).apply()
+        prefs(context).edit()
+            .remove(KEY_WEB_TOKEN)
+            .remove(KEY_WEB_TOKEN_TS)
+            .apply()
+        LauncherDebugLogger.log("TOKEN_INJECT", "Cleared web token from SharedPreferences")
     }
 }
 
@@ -217,14 +334,61 @@ fun BattleNetCredentialDialog(
 
 private const val DIALOG_SETTLE_MS = 300L
 
+private const val AUTH_URL = "https://account.battlenet.com.cn/login/zh/?externalChallenge=login&app=wow"
+
 @Composable
 fun BattleNetWebAuthDialog(
     onDismiss: () -> Unit,
 ) {
     val context = LocalContext.current
-    var currentUrl by remember { mutableStateOf("https://account.battlenet.com.cn/") }
+    var currentUrl by remember { mutableStateOf(AUTH_URL) }
     var webViewInstance by remember { mutableStateOf<WebView?>(null) }
     var hasCapturedToken by remember { mutableStateOf(!BattleNetSignIn.loadWebToken(context).isNullOrBlank()) }
+    var showAccountPrompt by remember { mutableStateOf(false) }
+    var accountInput by remember { mutableStateOf("") }
+
+    if (showAccountPrompt) {
+        AlertDialog(
+            onDismissRequest = {
+                showAccountPrompt = false
+                onDismiss()
+            },
+            title = { Text("设置战网账号") },
+            text = {
+                Column {
+                    Text("授信 Token 已成功捕获！请输入该 Token 对应的战网账号（邮箱或手机号），以用于完成凭据注入：")
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = accountInput,
+                        onValueChange = { accountInput = it },
+                        label = { Text("战网账号 / 邮箱") },
+                        singleLine = true,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = accountInput.isNotBlank(),
+                    onClick = {
+                        val trimmed = accountInput.trim()
+                        BattleNetSignIn.save(context, BattleNetSignIn.Login(trimmed, ""))
+                        showAccountPrompt = false
+                        onDismiss()
+                    },
+                ) {
+                    Text("保存并完成")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    showAccountPrompt = false
+                    onDismiss()
+                }) {
+                    Text("跳过")
+                }
+            },
+        )
+    }
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -256,7 +420,7 @@ fun BattleNetWebAuthDialog(
                             color = Color(0xFFF59E0B),
                         )
                         Text(
-                            text = if (hasCapturedToken) "状态: 已成功捕获并保存 SSO Token" else "请在下方登录以解除陌生网络/IP拦截",
+                            text = if (hasCapturedToken) "状态: 已成功捕获有效 ST Token" else "请在下方登录网易通行证以完成授权挑战",
                             fontSize = 11.sp,
                             color = if (hasCapturedToken) Color(0xFF22C55E) else Color(0xFF94A3B8),
                         )
@@ -278,22 +442,12 @@ fun BattleNetWebAuthDialog(
                 ) {
                     TextButton(
                         onClick = {
-                            currentUrl = "https://account.battlenet.com.cn/"
+                            currentUrl = AUTH_URL
                             webViewInstance?.loadUrl(currentUrl)
                         },
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                     ) {
-                        Text("战网中心", fontSize = 12.sp, color = Color(0xFF38BDF8))
-                    }
-
-                    TextButton(
-                        onClick = {
-                            currentUrl = "https://cn.account.battle.net/login/zh/?app=wow"
-                            webViewInstance?.loadUrl(currentUrl)
-                        },
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                    ) {
-                        Text("魔兽登录", fontSize = 12.sp, color = Color(0xFF38BDF8))
+                        Text("重新加载授权页", fontSize = 12.sp, color = Color(0xFF38BDF8))
                     }
 
                     TextButton(
@@ -322,7 +476,7 @@ fun BattleNetWebAuthDialog(
 
                 // Info banner
                 Text(
-                    text = "说明：若游戏报 BLZ51914400 拦截，说明手机网络受到暴雪/网易风控。在此网页中登录您的战网并通过滑块验证，同一网络IP即可通过授信；若捕获到 SSO Token 将自动保存注入游戏。",
+                    text = "说明：在此登录网易通行证并完成短信或滑块验证。授权成功后将自动捕获 ST 票据并在 Wine 容器内完成 DPAPI 加密注入，解除 14400 风控拦截。",
                     fontSize = 11.sp,
                     color = Color(0xFF94A3B8),
                     lineHeight = 15.sp,
@@ -357,33 +511,74 @@ fun BattleNetWebAuthDialog(
                                 CookieManager.getInstance().setAcceptCookie(true)
                                 CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
 
+                                fun checkAndHandleToken(urlString: String, uri: Uri?): Boolean {
+                                    val targetUri = uri ?: runCatching { Uri.parse(urlString) }.getOrNull() ?: return false
+                                    var token = targetUri.getQueryParameter("ST")
+                                        ?: targetUri.getQueryParameter("st")
+                                        ?: targetUri.getQueryParameter("ticket")
+                                        ?: targetUri.getQueryParameter("token")
+
+                                    if (token.isNullOrBlank()) {
+                                        val match = Regex("""[?&#](?:ST|st|token)=([^&#]+)""").find(urlString)
+                                        token = match?.groupValues?.get(1)
+                                    }
+
+                                    if (!token.isNullOrBlank()) {
+                                        val stRegex = Regex("""^CN-[0-9a-fA-F]{32}-\d+$""")
+                                        if (token.matches(stRegex)) {
+                                            BattleNetSignIn.saveWebToken(context, token)
+                                            hasCapturedToken = true
+                                            SnackbarManager.show("已成功捕获国服战网授信 Token！")
+                                            val saved = BattleNetSignIn.load(context)
+                                            if (saved == null || saved.email.isBlank()) {
+                                                showAccountPrompt = true
+                                            } else {
+                                                onDismiss()
+                                            }
+                                            return true
+                                        } else {
+                                            SnackbarManager.show("捕获的授信票据格式异常，已丢弃")
+                                            LauncherDebugLogger.log(
+                                                "WEB_AUTH",
+                                                "Token format regex mismatch, dropped: len=${token.length}, prefix=${token.take(4)}***",
+                                            )
+                                        }
+                                    }
+                                    return false
+                                }
+
                                 webViewClient = object : WebViewClient() {
                                     override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                                         val uri = request?.url ?: return false
                                         val urlString = uri.toString()
                                         currentUrl = urlString
-                                        checkToken(ctx, urlString)
+                                        if (urlString.startsWith("http://localhost:0/") ||
+                                            urlString.startsWith("http://localhost") ||
+                                            urlString.startsWith("https://localhost") ||
+                                            urlString.startsWith("battlenet://")
+                                        ) {
+                                            checkAndHandleToken(urlString, uri)
+                                            return true
+                                        }
                                         return false
                                     }
 
-                                    override fun onPageFinished(view: WebView?, url: String?) {
-                                        super.onPageFinished(view, url)
+                                    override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                                        super.onPageStarted(view, url, favicon)
                                         url?.let {
                                             currentUrl = it
-                                            checkToken(ctx, it)
+                                            if (it.startsWith("http://localhost") || it.startsWith("https://localhost")) {
+                                                checkAndHandleToken(it, null)
+                                            }
                                         }
                                     }
 
-                                    private fun checkToken(context: Context, url: String) {
-                                        try {
-                                            val uri = Uri.parse(url)
-                                            val st = uri.getQueryParameter("ST")
-                                            if (!st.isNullOrBlank()) {
-                                                BattleNetSignIn.saveWebToken(context, st)
-                                                hasCapturedToken = true
-                                                SnackbarManager.show("已捕获并保存国服战网 SSO Token！")
-                                            }
-                                        } catch (_: Exception) {}
+                                    override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
+                                        super.onReceivedError(view, request, error)
+                                        val urlString = request?.url?.toString()
+                                        if (urlString != null && (urlString.startsWith("http://localhost") || urlString.startsWith("https://localhost"))) {
+                                            checkAndHandleToken(urlString, request.url)
+                                        }
                                     }
                                 }
                                 loadUrl(currentUrl)
@@ -403,7 +598,7 @@ fun BattleNetWebAuthDialog(
                     shape = RoundedCornerShape(10.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB)),
                 ) {
-                    Text("完成网页验证 / 返回启动器", fontWeight = FontWeight.Bold, color = Color.White)
+                    Text("完成授信 / 返回启动器", fontWeight = FontWeight.Bold, color = Color.White)
                 }
             }
         }

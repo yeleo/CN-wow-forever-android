@@ -93,6 +93,7 @@ import app.gamenative.data.ShooterModeConfig
 import app.gamenative.events.AndroidEvent
 import app.gamenative.ui.screen.wow.BattleNetSignIn
 import app.gamenative.ui.screen.wow.GamePath
+import app.gamenative.ui.screen.wow.LauncherDebugLogger
 import app.gamenative.ui.enums.Orientation
 import java.util.EnumSet
 import app.gamenative.externaldisplay.ExternalDisplayInputController
@@ -3660,10 +3661,7 @@ private fun setupXEnvironment(
         envVars.remove("VKD3D_FRAME_RATE")
         if (!envVars.has("WINEESYNC")) envVars.put("WINEESYNC", "1")
 
-        val webToken = BattleNetSignIn.loadWebToken(context)
-        if (!webToken.isNullOrBlank()) {
-            envVars.put("WEB_TOKEN", webToken)
-        }
+        LauncherDebugLogger.log("LAUNCH_CMD", "Wine start command: $gameExecutable")
 
         val graphicsDriverConfig = KeyValueSet(container.getGraphicsDriverConfig())
         if (graphicsDriverConfig.get("version").lowercase(Locale.getDefault()).contains("gen8")) {
@@ -3691,8 +3689,56 @@ private fun setupXEnvironment(
                 container.setNeedsUnpacking(false)
                 container.saveData()
             }
+
+            val cTmp = File(container.rootDir, ".wine/drive_c/bnet_token.tmp")
+            val eTmp = File(context.filesDir.parentFile, "storage/bnet_token.tmp")
+            if (cTmp.exists() || eTmp.exists()) {
+                val startTime = System.currentTimeMillis()
+                PluviaApp.events.emit(AndroidEvent.SetBootingSplashText("Injecting Battle.net credentials..."))
+                LauncherDebugLogger.log("TOKEN_INJECT", "Running Wine DPAPI injector before game start...")
+                var injectorOutput = ""
+                var injectorSucceeded = false
+                try {
+                    val output = guestProgramLauncherComponent.execShellCommand("wine bnet_token_injector.exe", true)
+                    val duration = System.currentTimeMillis() - startTime
+                    injectorOutput = output?.trim() ?: ""
+                    LauncherDebugLogger.log("TOKEN_INJECT", "Injector executed in ${duration}ms, output: $injectorOutput")
+                    if (injectorOutput.contains("[injector] Success")) {
+                        injectorSucceeded = true
+                        LauncherDebugLogger.log("TOKEN_INJECT", "DPAPI credential injection SUCCESS")
+                        if (!BattleNetSignIn.KEEP_ST_AFTER_USE) {
+                            BattleNetSignIn.clearWebToken(context)
+                            LauncherDebugLogger.log("TOKEN_INJECT", "KEEP_ST_AFTER_USE is false; cleared saved ST")
+                        } else {
+                            LauncherDebugLogger.log("TOKEN_INJECT", "KEEP_ST_AFTER_USE is true; preserved ST for repeated launch")
+                        }
+                    } else {
+                        LauncherDebugLogger.log("TOKEN_INJECT", "DPAPI credential injection FAILED: output=$injectorOutput")
+                        Timber.e("DPAPI credential injection failed: $injectorOutput")
+                    }
+                } catch (e: Exception) {
+                    LauncherDebugLogger.log("TOKEN_INJECT", "DPAPI credential injection EXCEPTION: ${e.message}")
+                    Timber.e(e, "Exception running bnet_token_injector.exe")
+                } finally {
+                    listOf(cTmp, eTmp).forEach { f ->
+                        if (f.exists()) {
+                            try {
+                                f.writeBytes(ByteArray(f.length().toInt().coerceAtLeast(64)))
+                                f.delete()
+                            } catch (_: Exception) {}
+                        }
+                    }
+                }
+
+                if (!injectorSucceeded) {
+                    val errDetail = if (injectorOutput.isNotBlank()) injectorOutput else "Unknown injector error"
+                    throw IllegalStateException("战网授信凭据注入失败: $errDetail")
+                }
+            }
+
             if (!isExiting.get()) {
                 PluviaApp.events.emit(AndroidEvent.SetBootingSplashText("Launching game...\nStage 5/5: Executing Wow-ARM64.exe..."))
+                LauncherDebugLogger.log("CONTAINER", "Stage 5/5: Executing Wow-ARM64.exe in container")
             }
         }
 
