@@ -324,17 +324,6 @@ object WowClientDownloader {
     internal fun upsertBuildInfo(buildInfo: File, target: VersionCheckResult, regionCode: String? = null) {
         val lines = buildInfo.takeIf { it.isFile }?.readLines()?.filter { it.isNotBlank() }?.ifEmpty { null } ?: listOf(BUILD_INFO_HEADER)
         val header = psvHeader(lines.first())
-        val updates = mutableMapOf(
-            "Active" to "1",
-            "Version" to target.remoteVersion,
-            "Build Key" to target.remoteBuildConfig,
-            "CDN Key" to target.remoteCdnConfig,
-            "CDN Hosts" to target.remoteCdnHosts.joinToString(" "),
-            "CDN Path" to target.remoteCdnPath,
-            "CDN Servers" to target.remoteCdnServers.joinToString(" "),
-            "Product" to TARGET_PRODUCT,
-        )
-
         val rows = lines.drop(1).map { line -> header.zip(line.split("|")).toMap() }
         val existing = rows.indexOfFirst { it["Product"] == TARGET_PRODUCT }
         val effectiveBranch = regionCode?.lowercase(Locale.ROOT)
@@ -342,13 +331,37 @@ object WowClientDownloader {
             ?: rows.firstOrNull { it["Product"] == LEGACY_PRODUCT }?.get("Branch")?.takeIf { it.isNotBlank() }
             ?: defaultBranch()
         val region = effectiveBranch.uppercase(Locale.ROOT)
-        val localeTag = when (region) {
-            "CN" -> "zhCN"
-            "TW" -> "zhTW"
-            "KR" -> "koKR"
-            else -> "enUS"
+
+        val fallbackHosts = if (region == "CN") listOf("blzdist-wow.necdn.leihuo.netease.com", "level3.blizzard.com", "us.cdn.blizzard.com") else DEFAULT_CDN_HOSTS
+        val cdnHosts = target.remoteCdnHosts.ifEmpty { fallbackHosts }
+        val cdnServers = target.remoteCdnServers.ifEmpty { cdnHosts.map { "http://$it/?maxhosts=4" } }
+
+        val updates = mutableMapOf(
+            "Active" to "1",
+            "Version" to target.remoteVersion,
+            "Build Key" to target.remoteBuildConfig,
+            "CDN Key" to target.remoteCdnConfig,
+            "CDN Hosts" to cdnHosts.joinToString(" "),
+            "CDN Path" to target.remoteCdnPath.ifBlank { DEFAULT_CDN_PATH },
+            "CDN Servers" to cdnServers.joinToString(" "),
+            "Product" to TARGET_PRODUCT,
+        )
+
+        val tags = if (region == "CN") {
+            listOf("speech", "text").flatMap {
+                listOf(
+                    "Windows $PLATFORM_ARCH $region? enUS $it?",
+                    "Windows $PLATFORM_ARCH $region? zhCN $it?",
+                )
+            }.joinToString(":")
+        } else {
+            val localeTag = when (region) {
+                "TW" -> "zhTW"
+                "KR" -> "koKR"
+                else -> "enUS"
+            }
+            listOf("speech", "text").joinToString(":") { "Windows $PLATFORM_ARCH $region? $localeTag $it?" }
         }
-        val tags = listOf("speech", "text").joinToString(":") { "Windows $PLATFORM_ARCH $region? $localeTag $it?" }
         updates["Branch"] = effectiveBranch
         updates["Tags"] = tags
 

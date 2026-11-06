@@ -161,15 +161,30 @@ fun BootingSplash(
 
                 Spacer(modifier = Modifier.height(20.dp))
 
+                val textParts = text.split("\n", limit = 2)
                 Text(
-                    text = text,
+                    text = textParts[0],
                     style = MaterialTheme.typography.bodyMedium.copy(
                         fontWeight = FontWeight.Medium,
                         letterSpacing = 1.sp,
                     ),
-                    color = Color.White.copy(alpha = 0.7f),
+                    color = Color.White.copy(alpha = 0.9f),
                     textAlign = TextAlign.Center,
                 )
+
+                if (textParts.size > 1 && textParts[1].isNotBlank()) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = textParts[1],
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontSize = 12.sp,
+                            letterSpacing = 0.5.sp,
+                        ),
+                        color = WowGold.copy(alpha = 0.9f),
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 24.dp),
+                    )
+                }
 
                 Spacer(modifier = Modifier.height(14.dp))
 

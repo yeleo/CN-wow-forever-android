@@ -91,6 +91,7 @@ import app.gamenative.PrefManager
 import app.gamenative.data.GyroSettings
 import app.gamenative.data.ShooterModeConfig
 import app.gamenative.events.AndroidEvent
+import app.gamenative.ui.screen.wow.GamePath
 import app.gamenative.ui.enums.Orientation
 import java.util.EnumSet
 import app.gamenative.externaldisplay.ExternalDisplayInputController
@@ -2183,6 +2184,7 @@ fun XServerScreen(
                             Timber.i("Doing things once")
                             val envVars = EnvVars()
 
+                            PluviaApp.events.emit(AndroidEvent.SetBootingSplashText("Launching game...\nStage 1/5: Configuring Wine system files..."))
                             runBlocking {
                                 setupWineSystemFiles(
                                     context,
@@ -2197,6 +2199,7 @@ fun XServerScreen(
                                 )
                             }
 
+                            PluviaApp.events.emit(AndroidEvent.SetBootingSplashText("Launching game...\nStage 2/5: Loading graphics driver & DXVK..."))
                             runBlocking {
                                 extractGraphicsDriverFiles(
                                     context,
@@ -2210,9 +2213,11 @@ fun XServerScreen(
                                 )
                             }
 
+                            PluviaApp.events.emit(AndroidEvent.SetBootingSplashText("Launching game...\nStage 3/5: Configuring audio & Wine prefix..."))
                             changeWineAudioDriver(xServerState.value.audioDriver, container, ImageFs.find(context))
                             setImagefsContainerVariant(context, container)
                             if (isExiting.get()) return@submit
+                            PluviaApp.events.emit(AndroidEvent.SetBootingSplashText("Launching game...\nStage 4/5: Initializing XServer & environment..."))
                             PluviaApp.xEnvironment = setupXEnvironment(
                                 context,
                                 appId,
@@ -3681,7 +3686,7 @@ private fun setupXEnvironment(
                 container.saveData()
             }
             if (!isExiting.get()) {
-                PluviaApp.events.emit(AndroidEvent.SetBootingSplashText("Launching game..."))
+                PluviaApp.events.emit(AndroidEvent.SetBootingSplashText("Launching game...\nStage 5/5: Executing Wow-ARM64.exe..."))
             }
         }
 
@@ -3766,9 +3771,18 @@ private fun setupXEnvironment(
     guestProgramLauncherComponent.envVars = EnvVars().apply { putAll(envVars) }
 
     val gameTerminationCallback = Callback<Int> { status ->
-        if (status != 0) {
-            Timber.e("Guest program terminated with status: $status")
-            onGameLaunchError?.invoke("Game terminated with error status: $status")
+        Timber.i("Guest program terminated with status: $status (splash showing: ${PluviaApp.isBootingSplashShowing})")
+        if (status != 0 || PluviaApp.isBootingSplashShowing) {
+            val gameRoot = java.io.File(GamePath.load(context))
+            val crashLog = GamePath.findLatestCrashLog(gameRoot)
+            val errorMsg = if (!crashLog.isNullOrBlank()) {
+                "Game crashed on launch (exit $status):\n$crashLog"
+            } else if (status != 0) {
+                "Wine/Game process exited with error status $status"
+            } else {
+                "Wine/Game process exited before window was displayed"
+            }
+            onGameLaunchError?.invoke(errorMsg)
         }
         PluviaApp.events.emit(AndroidEvent.GuestProgramTerminated)
     }

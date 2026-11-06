@@ -495,6 +495,7 @@ fun preLaunchApp(
             context.getString(R.string.main_installing_bionic)
         }
         setLoadingMessage(loadingMessage)
+        PluviaApp.events.emit(AndroidEvent.SetBootingSplashText("Launching game...\nPreparing Wine/Proton environment..."))
         val imageFsInstallSuccess =
             ImageFsInstaller.installIfNeededFuture(context, context.assets, container) { progress ->
                 setLoadingProgress(progress / 100f)

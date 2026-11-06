@@ -213,10 +213,14 @@ fun WoWForeverScreen(
                 val screenSize = fitScreenSizeToWindow(context, resolution.size)
                 val containerId = withContext(Dispatchers.IO) {
                     prepareLaunch(context, File(gamePath), gpu, screenSize) { msg ->
-                        scope.launch(Dispatchers.Main) { statusText = msg }
+                        scope.launch(Dispatchers.Main) {
+                            statusText = msg
+                            PluviaApp.events.emit(AndroidEvent.SetBootingSplashText("Launching game...\n$msg"))
+                        }
                     }
                 }
                 statusText = "Booting into World of Warcraft..."
+                PluviaApp.events.emit(AndroidEvent.SetBootingSplashText("Launching game...\nStarting XServer environment..."))
                 onLaunch(containerId)
             } catch (e: CancellationException) {
                 throw e
@@ -261,11 +265,19 @@ fun WoWForeverScreen(
             resetLaunch()
             BattleNetSignIn.removeLoginFile(File(gamePath))
         }
+        val onLaunchFailed: (AndroidEvent.GameLaunchFailed) -> Unit = { event ->
+            resetLaunch()
+            BattleNetSignIn.removeLoginFile(File(gamePath))
+            errorMessage = event.message
+            statusText = "Launch failed"
+        }
         PluviaApp.events.on<AndroidEvent.ForceCloseApp, Unit>(reset)
         PluviaApp.events.on<AndroidEvent.GuestProgramTerminated, Unit>(reset)
+        PluviaApp.events.on<AndroidEvent.GameLaunchFailed, Unit>(onLaunchFailed)
         onDispose {
             PluviaApp.events.off<AndroidEvent.ForceCloseApp, Unit>(reset)
             PluviaApp.events.off<AndroidEvent.GuestProgramTerminated, Unit>(reset)
+            PluviaApp.events.off<AndroidEvent.GameLaunchFailed, Unit>(onLaunchFailed)
         }
     }
 
@@ -1010,6 +1022,16 @@ object GamePath {
 
     fun freeSpaceBytes(path: String): Long =
         generateSequence(File(path)) { it.parentFile }.firstOrNull { it.exists() }?.usableSpace ?: 0L
+
+    fun findLatestCrashLog(gameRoot: File): String? {
+        val errorsDir = File(gameRoot, "$FLAVOR_DIR/Errors")
+        if (!errorsDir.isDirectory) return null
+        val latestFile = errorsDir.listFiles { f -> f.isFile && f.extension.equals("txt", ignoreCase = true) }
+            ?.maxByOrNull { it.lastModified() } ?: return null
+        return runCatching {
+            latestFile.readLines().take(5).joinToString("\n").take(300)
+        }.getOrNull()
+    }
 
     private fun productsOf(root: File) = WowClientDownloader.installedProducts(File(root, BUILD_INFO))
 }

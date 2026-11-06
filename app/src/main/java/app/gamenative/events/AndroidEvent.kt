@@ -15,4 +15,5 @@ interface AndroidEvent<T> : Event<T> {
     data class SetBootingSplashText(val text: String) : AndroidEvent<Unit>
     data object ClearBootingSplash : AndroidEvent<Unit>
     data object ForceCloseApp : AndroidEvent<Unit>
+    data class GameLaunchFailed(val message: String) : AndroidEvent<Unit>
 }

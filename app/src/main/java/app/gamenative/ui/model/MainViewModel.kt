@@ -17,7 +17,9 @@ import app.gamenative.utils.ContainerUtils
 import app.gamenative.utils.WineProcessSnapshotHelper
 import com.winlator.xserver.Window
 import dagger.hilt.android.lifecycle.HiltViewModel
+import java.io.File
 import javax.inject.Inject
+import app.gamenative.ui.screen.wow.GamePath
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -160,12 +162,31 @@ class MainViewModel @Inject constructor(
 
     private var launchAppJob: Job? = null
 
+    private fun startBootingTimeoutWatcher(context: Context? = null) {
+        bootingSplashTimeoutJob?.cancel()
+        bootingSplashTimeoutJob = viewModelScope.launch {
+            delay(45_000)
+            if (!isActive) return@launch
+            if (_state.value.showBootingSplash) {
+                Timber.w("Booting splash timed out after 45s without window mapping")
+                val crashLog = context?.let { GamePath.findLatestCrashLog(File(GamePath.load(it))) }
+                val errorMsg = if (!crashLog.isNullOrBlank()) {
+                    "Game launch timed out (crash detected):\n$crashLog"
+                } else {
+                    "Game launch timed out (45s). Process may be unresponsive."
+                }
+                onGameLaunchError(errorMsg)
+            }
+        }
+    }
+
     fun launchApp(context: Context, appId: String) {
         gamePlayedThisSession = true
         PrefManager.hasAttemptedGameLaunch = true
         launchAppJob?.cancel()
         launchAppJob = viewModelScope.launch {
             setShowBootingSplash(true)
+            startBootingTimeoutWatcher(context)
             PluviaApp.events.emit(AndroidEvent.SetAllowedOrientation(PrefManager.allowedOrientation))
 
             val apiJob = viewModelScope.async(Dispatchers.IO) {
@@ -209,8 +230,9 @@ class MainViewModel @Inject constructor(
             bootingSplashTimeoutJob = null
             setShowBootingSplash(false)
             PluviaApp.events.emit(AndroidEvent.ClearBootingSplash)
+            PluviaApp.events.emit(AndroidEvent.GameLaunchFailed(error))
+            PluviaApp.events.emit(AndroidEvent.ForceCloseApp)
 
-            // You could also show an error dialog here if needed
             Timber.tag("MainViewModel").e("Game launch error: $error")
         }
     }

@@ -118,7 +118,7 @@ class WowClientDownloaderTest {
         assertEquals("wowf", row["Product"])
         assertEquals("cn", row["Branch"])
         assertEquals("blzdist-wow.necdn.leihuo.netease.com level3.blizzard.com", row["CDN Hosts"])
-        assertEquals("Windows arm64 CN? zhCN speech?:Windows arm64 CN? zhCN text?", row["Tags"])
+        assertEquals("Windows arm64 CN? enUS speech?:Windows arm64 CN? zhCN speech?:Windows arm64 CN? enUS text?:Windows arm64 CN? zhCN text?", row["Tags"])
     }
 
     @Test

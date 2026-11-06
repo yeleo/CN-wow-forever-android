@@ -54,6 +54,8 @@ import java.net.InetAddress;
 import java.util.ArrayList;
 import java.util.List;
 
+import timber.log.Timber;
+
 import app.gamenative.BuildConfig;
 import app.gamenative.PluviaApp;
 import app.gamenative.events.AndroidEvent;
@@ -96,6 +98,20 @@ public class BionicProgramLauncherComponent extends GuestProgramLauncherComponen
                 return imageFs.getLibDir() + "/libredirect-bionic-wx-minimal.so";
             }
             return null;
+        }
+        // On Android 17 (and modern preview/Baklava builds), wine hangs at start in
+        // futex(FUTEX_WAIT_BITSET_PRIVATE, 1) on a lock at the same page offset as the full
+        // shim's pthread_once for ffp_init (the one-time "faster file path" setup that 22 hooks wait on).
+        // A thread re-entering a once it is running waits for itself. The minimal shim
+        // (libredirect-bionic-wx-minimal.so) has no such setup and keeps what Wine needs to run under W^X.
+        if (BuildConfig.MODERN_ANDROID && (
+                android.os.Build.VERSION.SDK_INT >= 36
+                || (android.os.Build.VERSION.RELEASE != null && android.os.Build.VERSION.RELEASE.startsWith("17"))
+                || "Baklava".equalsIgnoreCase(android.os.Build.VERSION.CODENAME)
+        )) {
+            Timber.i("Android %d (v%s, codename=%s): preloading minimal libredirect shim to prevent pthread_once hang",
+                    android.os.Build.VERSION.SDK_INT, android.os.Build.VERSION.RELEASE, android.os.Build.VERSION.CODENAME);
+            return imageFs.getLibDir() + "/libredirect-bionic-wx-minimal.so";
         }
         return imageFs.getLibDir() + "/" + BuildConfig.PRELOAD_BIONIC_SO;
     }
