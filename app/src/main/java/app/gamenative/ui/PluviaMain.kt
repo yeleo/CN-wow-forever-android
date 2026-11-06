@@ -328,10 +328,7 @@ fun PluviaMain(
                                 setLoadingProgress = viewModel::setLoadingDialogProgress,
                                 setLoadingMessage = viewModel::setLoadingDialogMessage,
                                 setMessageDialogState = { msgDialogState = it },
-                                onSuccess = { ctx, id ->
-                                    LauncherDebugLogger.log("P3_ROUTE", "preLaunchApp onSuccess, calling viewModel.launchApp")
-                                    viewModel.launchApp(ctx, id)
-                                },
+                                onSuccess = viewModel::launchApp,
                             )
                         },
                     )
@@ -529,6 +526,7 @@ fun preLaunchApp(
 
         setLoadingDialogVisible(false)
         if (!isActive) return@launch
+        LauncherDebugLogger.log("P3_ROUTE", "preLaunchApp succeeded, triggering onSuccess for $appId")
         onSuccess(context, appId)
     }
 }
