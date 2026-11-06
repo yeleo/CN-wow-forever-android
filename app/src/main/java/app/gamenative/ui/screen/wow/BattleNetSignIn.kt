@@ -244,10 +244,13 @@ object BattleNetSignIn {
     private const val KEY_WEB_TOKEN = "web_token"
     private const val KEY_WEB_TOKEN_TS = "web_token_ts"
 
+    val ST_REGEX = Regex("""^CN-[0-9a-fA-F]{32}-\d+$""")
     const val ST_EXPIRATION_MINUTES = 60L
     var KEEP_ST_AFTER_USE = true
 
     fun hasCredentials(context: Context): Boolean = load(context) != null
+
+    fun loadAccountEmail(context: Context): String? = load(context)?.email
 
     fun loadWebToken(context: Context): String? =
         prefs(context).getString(KEY_WEB_TOKEN, null)
@@ -524,8 +527,7 @@ fun BattleNetWebAuthDialog(
                                     }
 
                                     if (!token.isNullOrBlank()) {
-                                        val stRegex = Regex("""^CN-[0-9a-fA-F]{32}-\d+$""")
-                                        if (token.matches(stRegex)) {
+                                        if (token.matches(BattleNetSignIn.ST_REGEX)) {
                                             BattleNetSignIn.saveWebToken(context, token)
                                             hasCapturedToken = true
                                             SnackbarManager.show("已成功捕获国服战网授信 Token！")

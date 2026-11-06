@@ -1411,7 +1411,7 @@ private fun prepareLaunch(context: Context, gameRoot: File, gpu: GpuProfile, scr
 
         // 2. Stage temporary credential file (C:\bnet_token.tmp & E:\bnet_token.tmp)
         try {
-            val accountEmail = login?.account ?: BattleNetSignIn.loadAccountEmail(context) ?: ""
+            val accountEmail = login?.email ?: BattleNetSignIn.loadAccountEmail(context) ?: ""
             val tmpContent = "$webToken\n$accountEmail\n"
 
             // C:\bnet_token.tmp
