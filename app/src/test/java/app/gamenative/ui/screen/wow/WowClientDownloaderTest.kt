@@ -107,6 +107,21 @@ class WowClientDownloaderTest {
     }
 
     @Test
+    fun upsertBuildInfo_forCnRegion_setsCnBranchAndZhCnTags() {
+        val buildInfo = File(tempFolder.newFolder("cn_fresh"), ".build.info")
+        val cnTarget = TARGET.copy(
+            remoteCdnHosts = listOf("blzdist-wow.necdn.leihuo.netease.com", "level3.blizzard.com"),
+        )
+        WowClientDownloader.upsertBuildInfo(buildInfo, cnTarget, "CN")
+
+        val row = WowClientDownloader.readBuildInfo(buildInfo)!!
+        assertEquals("wowf", row["Product"])
+        assertEquals("cn", row["Branch"])
+        assertEquals("blzdist-wow.necdn.leihuo.netease.com level3.blizzard.com", row["CDN Hosts"])
+        assertEquals("Windows arm64 CN? zhCN speech?:Windows arm64 CN? zhCN text?", row["Tags"])
+    }
+
+    @Test
     fun upsertBuildInfo_updatesExistingForeverRowInPlace() {
         val buildInfo = File(tempFolder.newFolder("update"), ".build.info")
         WowClientDownloader.upsertBuildInfo(buildInfo, TARGET.copy(remoteVersion = "1.60.1.70000", remoteBuildConfig = "0".repeat(32)))

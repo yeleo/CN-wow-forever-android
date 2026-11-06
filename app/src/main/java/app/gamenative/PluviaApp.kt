@@ -99,6 +99,8 @@ class PluviaApp : Application() {
                 .onFailure { Timber.e(it, "shutdownEnvironment: radialMenuCoordinator.detach") }
             runCatching { env?.stopEnvironmentComponents() }
                 .onFailure { Timber.e(it, "shutdownEnvironment: stopEnvironmentComponents") }
+            runCatching { app.gamenative.ui.screen.wow.BattleNetSignIn.removeLoginFile(instance) }
+                .onFailure { Timber.e(it, "shutdownEnvironment: removeLoginFile") }
 
 
             xEnvironment = null

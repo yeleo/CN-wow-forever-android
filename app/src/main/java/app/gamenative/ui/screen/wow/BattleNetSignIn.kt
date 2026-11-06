@@ -82,12 +82,23 @@ object BattleNetSignIn {
         }
     }
 
+    fun removeLoginFile(context: Context) {
+        try {
+            val path = GamePath.load(context)
+            removeLoginFile(File(path))
+        } catch (_: Exception) {}
+        try {
+            val defaultPath = File(android.os.Environment.getExternalStorageDirectory(), "WoW Forever")
+            removeLoginFile(defaultPath)
+        } catch (_: Exception) {}
+    }
+
     fun startLoginWatcher(gameRoot: File) {
         CoroutineScope(Dispatchers.IO).launch {
             val hotfixLog = File(File(gameRoot, WowClientDownloader.FLAVOR_DIR), "Logs/Hotfix.log")
             hotfixLog.delete()
-            // A fresh install's first boot streams assets and plays the intro cinematic before reaching the login screen.
-            val deadline = System.currentTimeMillis() + 600_000L
+            // WoW client reads login.txt on early startup. Wipe and delete within 25s to avoid exposing credentials.
+            val deadline = System.currentTimeMillis() + 25_000L
             while (isActive && System.currentTimeMillis() < deadline) {
                 delay(1000L)
                 if (hotfixLog.exists() && hotfixLog.length() > 50_000L) {

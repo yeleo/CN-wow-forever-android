@@ -124,6 +124,7 @@ class MainActivity : ComponentActivity() {
         // listeners during super.onDestroy's lifecycle transition) still fire
         if (!isChangingConfigurations) {
             PluviaApp.events.emit(AndroidEvent.ActivityDestroyed)
+            runCatching { app.gamenative.ui.screen.wow.BattleNetSignIn.removeLoginFile(this) }
 
             // if exit() didn't run (listener already unregistered, race, etc.)
             // force-clear so the app isn't stuck on next launch

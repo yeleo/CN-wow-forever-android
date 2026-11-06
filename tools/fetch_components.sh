@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="$REPO_DIR/app/src/main/assets/bundled_components"
-RELEASE_URL="${COMPONENTS_URL:-https://github.com/jaredgei/wow-forever-android/releases/download/components-v1}"
+RELEASE_URL="https://github.com/jaredgei/wow-forever-android/releases/download/components-v1"
 FILES=(
     proton-11.0-90624-arm64ec.wcp
     dxvk-2.4.1-wow-aarch64-test.wcp

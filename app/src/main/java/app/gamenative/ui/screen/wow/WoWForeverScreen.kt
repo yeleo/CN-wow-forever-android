@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Build
 import android.os.Environment
 import android.view.WindowManager
+import java.util.Locale
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -168,7 +169,7 @@ fun WoWForeverScreen(
 
     suspend fun fetchVersionStatus() {
         isCheckingVersion = true
-        versionStatus = withContext(Dispatchers.IO) { WowClientDownloader.checkVersion(File(gamePath)) }
+        versionStatus = withContext(Dispatchers.IO) { WowClientDownloader.checkVersion(File(gamePath), region.name) }
         isCheckingVersion = false
     }
 
@@ -324,7 +325,7 @@ fun WoWForeverScreen(
 
     fun performInstall() {
         showUpgradeDialog = false
-        downloadGameFiles("Install failed", WowClientDownloader::install) {
+        downloadGameFiles("Install failed", { root, onStatus -> WowClientDownloader.install(root, region.name, onStatus) }) {
             versionStatus = null
             if (checkFiles()) {
                 checkVersionStatus()
@@ -335,7 +336,7 @@ fun WoWForeverScreen(
 
     fun performUpdate() {
         val target = versionStatus ?: return
-        downloadGameFiles("Update failed", { root, onStatus -> WowClientDownloader.updateGame(root, target, onStatus) }) {
+        downloadGameFiles("Update failed", { root, onStatus -> WowClientDownloader.updateGame(root, target, region.name, onStatus) }) {
             checkFiles()
             versionStatus = target.copy(isOutdated = false, localVersion = target.remoteVersion)
             launchGame()
@@ -472,6 +473,7 @@ fun WoWForeverScreen(
                         OptionMenu("Region: ${region.label}", Icons.Default.Public, GameRegion.entries, region, { it.label }, !isLaunching) {
                             GameRegion.save(context, it)
                             region = it
+                            checkVersionStatus()
                         }
                         OptionMenu("Resolution: ${resolution.label}", Icons.Default.AspectRatio, RenderResolution.entries, resolution, { it.label }, !isLaunching) {
                             RenderResolution.save(context, it)
@@ -888,11 +890,33 @@ private fun prefs(context: Context) = context.getSharedPreferences("wow_forever"
  * The Battle.net region WoW logs into. Without the Battle.net app to pick one, WoW stops at a region picker before
  * login, so the launcher writes it to Config.wtf as the portal.
  */
-enum class GameRegion(val label: String) {
-    US("Americas"), EU("Europe"), KR("Korea"), TW("Taiwan");
+enum class GameRegion(
+    val label: String,
+    val portal: String,
+    val textLocale: String = "enUS",
+    val audioLocale: String = "enUS",
+) {
+    US("Americas", "US", "enUS", "enUS"),
+    EU("Europe", "EU", "enUS", "enUS"),
+    KR("Korea", "KR", "koKR", "koKR"),
+    TW("Taiwan", "TW", "zhTW", "zhTW"),
+    CN("China (国服)", "CN", "zhCN", "zhCN");
 
     companion object {
         private const val KEY_REGION = "region"
+
+        fun defaultRegion(): GameRegion {
+            val country = Locale.getDefault().country.uppercase(Locale.ROOT)
+            val lang = Locale.getDefault().language.lowercase(Locale.ROOT)
+            val str = Locale.getDefault().toString().lowercase(Locale.ROOT)
+            return when {
+                country == "CN" || str.startsWith("zh_cn") || (lang == "zh" && (country.isEmpty() || country == "CN")) -> CN
+                country == "TW" || country == "HK" || country == "MO" || str.startsWith("zh_tw") || str.startsWith("zh_hk") -> TW
+                country == "KR" || lang == "ko" -> KR
+                country in WowClientDownloader.EU_COUNTRIES -> EU
+                else -> US
+            }
+        }
 
         /** The region picked in the launcher, or null to keep the install's current portal. */
         fun saved(context: Context): GameRegion? = prefs(context).getString(KEY_REGION, null)?.let(::of)
@@ -901,9 +925,10 @@ enum class GameRegion(val label: String) {
             prefs(context).edit().putString(KEY_REGION, region.name).apply()
         }
 
-        fun current(context: Context, gamePath: String): GameRegion = saved(context) ?: of(portalOf(File(gamePath))) ?: US
+        fun current(context: Context, gamePath: String): GameRegion =
+            saved(context) ?: of(portalOf(File(gamePath))) ?: defaultRegion()
 
-        private fun of(portal: String) = entries.firstOrNull { it.name.equals(portal, ignoreCase = true) }
+        fun of(portal: String?) = portal?.let { p -> entries.firstOrNull { it.name.equals(p, ignoreCase = true) } }
     }
 }
 
@@ -1170,13 +1195,16 @@ private fun prepareLaunch(context: Context, gameRoot: File, gpu: GpuProfile, scr
     }
 
     val arm64Exe = File(gameRoot, "$FLAVOR_DIR/$EXE_NAME")
-    BattleNetSignIn.load(context)?.let { login ->
+    val login = BattleNetSignIn.load(context)
+    if (login != null) {
         BattleNetSignIn.writeLoginFile(gameRoot, login)
         BattleNetSignIn.startLoginWatcher(gameRoot)
+    } else {
+        BattleNetSignIn.removeLoginFile(gameRoot)
     }
     if (!arm64Exe.exists()) {
         try {
-            WowClientDownloader.download(gameRoot, onStatus)
+            WowClientDownloader.download(gameRoot, GameRegion.saved(context)?.name, onStatus)
         } catch (e: Exception) {
             if (!arm64Exe.exists()) throw IllegalStateException("Couldn't download $EXE_NAME: ${e.message}", e)
             Timber.w(e, "Client update check failed, launching the existing $EXE_NAME")
@@ -1275,20 +1303,38 @@ internal fun ensureGameConfig(root: File, screenSize: String, region: GameRegion
     // missing); without the Battle.net app to supply it, WoW otherwise stops at a region picker before login.
     val configWtf = File(root, CONFIG_WTF)
     val betaConfigWtf = File(root, "$LEGACY_FLAVOR_DIR/WTF/Config.wtf")
+    val effectiveRegion = region ?: GameRegion.of(portalOf(root)) ?: GameRegion.defaultRegion()
+
     if (!configWtf.exists() && betaConfigWtf.isFile) {
         // Carry the player's settings over from the beta, minus the lines that pointed it at the beta servers.
         configWtf.parentFile?.mkdirs()
         val betaOnly = listOf("SET portal ", "SET agentUID ", "SET CACHE-")
         val carried = betaConfigWtf.readLines().filterNot { line -> betaOnly.any { line.startsWith(it, ignoreCase = true) } }
-        configWtf.writeText((carried + "SET agentUID ${CONFIG_DEFAULTS.getValue("agentUID")}").joinToString("\n") + "\n")
+        val newLines = carried.toMutableList()
+        newLines.add("SET agentUID ${CONFIG_DEFAULTS.getValue("agentUID")}")
+        configWtf.writeText(newLines.joinToString("\n") + "\n")
     }
     if (!configWtf.exists()) {
         configWtf.parentFile?.mkdirs()
-        configWtf.writeText(CONFIG_DEFAULTS.entries.joinToString("\n") { "SET ${it.key} ${it.value}" } + "\n")
+        val defaults = LinkedHashMap(CONFIG_DEFAULTS)
+        defaults["portal"] = "\"${effectiveRegion.portal}\""
+        if (effectiveRegion == GameRegion.CN) {
+            defaults["textLocale"] = "\"zhCN\""
+            defaults["audioLocale"] = "\"zhCN\""
+        }
+        configWtf.writeText(defaults.entries.joinToString("\n") { "SET ${it.key} ${it.value}" } + "\n")
     }
 
-    val forced = mapOf("gxApi" to CONFIG_DEFAULTS.getValue("gxApi"), "portal" to "\"${region?.name ?: portalOf(root)}\"") +
-        RESOLUTION_KEYS.associateWith { "\"$screenSize\"" }
+    val forced = mutableMapOf(
+        "gxApi" to CONFIG_DEFAULTS.getValue("gxApi"),
+        "portal" to "\"${effectiveRegion.portal}\"",
+    )
+    if (effectiveRegion == GameRegion.CN) {
+        forced["textLocale"] = "\"zhCN\""
+        forced["audioLocale"] = "\"zhCN\""
+    }
+    RESOLUTION_KEYS.forEach { forced[it] = "\"$screenSize\"" }
+
     val forcedLines = forced.map { (key, value) -> "SET $key $value" }
     val original = configWtf.readLines()
     if (!original.containsAll(forcedLines)) {
@@ -1305,7 +1351,8 @@ private const val CONFIG_WTF = "$FLAVOR_DIR/WTF/Config.wtf"
 private fun portalOf(root: File) =
     File(root, CONFIG_WTF).takeIf { it.isFile }?.readLines()?.firstOrNull { it.startsWith("SET portal ", ignoreCase = true) }
         ?.substringAfter(" ")?.substringAfter(" ")?.trim('"')?.takeIf { it.isNotBlank() }
-        ?: WowClientDownloader.readBuildInfo(File(root, BUILD_INFO))?.get("Branch")?.takeIf { it.isNotBlank() }?.uppercase() ?: "US"
+        ?: WowClientDownloader.readBuildInfo(File(root, BUILD_INFO))?.get("Branch")?.takeIf { it.isNotBlank() }?.uppercase()
+        ?: GameRegion.defaultRegion().name
 
 private fun installBundledComponents(context: Context, onStatus: (String) -> Unit) {
     installDriver(context, DEFAULT_DRIVER, "turnip-wow-scheduler-test.zip", onStatus)

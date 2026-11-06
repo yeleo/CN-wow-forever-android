@@ -1,0 +1,100 @@
+name: Build & Release WoW Forever CN
+
+on:
+  push:
+    branches:
+      - "CN"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout CN branch
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Fetch & Verify Runtime Components
+        run: |
+          chmod +x tools/fetch_components.sh
+          ./tools/fetch_components.sh
+
+      - name: Build APK (assembleModernRelease)
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleModernRelease --no-daemon --stacktrace
+
+      - name: Prepare APK Asset
+        id: prepare_asset
+        run: |
+          VERSION=$(grep 'versionName = ' app/build.gradle.kts | head -n 1 | sed 's/.*versionName = "\(.*\)".*/\1/')
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          APK_NAME="WoW-Forever-CN-v${VERSION}.apk"
+          
+          BUILT_APK=$(find app/build/outputs/apk/modern/release -type f -name "*.apk" | head -n 1)
+          if [ -z "$BUILT_APK" ]; then
+            echo "Error: Release APK not found in app/build/outputs/apk/modern/release"
+            exit 1
+          fi
+          
+          mkdir -p dist
+          cp "$BUILT_APK" "dist/$APK_NAME"
+          echo "apk_path=dist/$APK_NAME" >> "$GITHUB_OUTPUT"
+          echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Artifact Backup
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.prepare_asset.outputs.apk_name }}
+          path: ${{ steps.prepare_asset.outputs.apk_path }}
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: "v${{ steps.prepare_asset.outputs.version }}-cn-${{ github.run_number }}"
+          name: "WoW Forever CN v${{ steps.prepare_asset.outputs.version }} (Build #${{ github.run_number }})"
+          body: |
+            ### 🎮 WoW Forever Android (国服特供版)
+            
+            - **版本号**: `v${{ steps.prepare_asset.outputs.version }}`
+            - **分支**: `CN` (`${{ steps.prepare_asset.outputs.short_sha }}`)
+            - **构建任务**: #${{ github.run_number }}
+            
+            ---
+            
+            ### 🌟 本次版本特性
+            1. **中国区（国服）原生适配**：
+               - 新增 `China (国服)` 区域与 Portal `CN`。
+               - 系统语言为中文或地区为 CN 时默认选中。
+               - 自动注入 `WTF/Config.wtf`（`SET portal "CN"`, `SET textLocale "zhCN"`, `SET audioLocale "zhCN"`）。
+            2. **国服 CDN 直连高速下载**：
+               - 免电脑直连下载 250MB 客户端 `Wow-ARM64.exe` 及后续流式游戏数据。
+               - 优先直连国服官方及网易/国内镜像节点（`cn.patch.battle.net:1119` 与 `blzdist-wow.necdn.leihuo.netease.com`），自动 fallback 至全球节点确保高可用。
+               - 本地 `.build.info` 正确记录 `cn` 分支与国内 CDN Hosts，避免 `CAS system was unable to initialize` 启动崩溃。
+            3. **安全加固与防泄露机制**：
+               - 彻底移除输入法软键盘与按键日志记录，杜绝密码泄露进系统 Logcat 与本地崩溃日志。
+               - 加固 `login.txt` 生命周期：启动 25 秒后台自动擦除（0 覆写删除），退出游戏或返回启动器时强制彻底销毁。
+               - 保留纯手动游戏内登录模式，可不配置保存账号直接启动进入游戏中文登录框输入。
+            4. **二进制完整性保证**：
+               - 所有预打包 Wine/Proton/DXVK/Turnip 运行时组件均通过 SHA256 哈希比对校验。
+          files: ${{ steps.prepare_asset.outputs.apk_path }}
+          draft: false
+          prerelease: false
+

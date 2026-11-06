@@ -46,6 +46,23 @@ class GameConfigTest {
     }
 
     @Test
+    fun pickedRegion_cn_setsPortalAndZhCnLocale() {
+        val root = install("us", "SET portal \"US\"\nSET gxApi \"D3D11\"\n")
+        ensureGameConfig(root, "1920x1080", GameRegion.CN)
+        assertEquals(listOf("SET portal \"CN\""), portals(root))
+        val lines = configWtf(root).readLines()
+        assertEquals(listOf("SET textLocale \"zhCN\""), lines.filter { it.startsWith("SET textLocale ") })
+        assertEquals(listOf("SET audioLocale \"zhCN\""), lines.filter { it.startsWith("SET audioLocale ") })
+    }
+
+    @Test
+    fun noRegionPicked_withCnPortal_keepsCn() {
+        val root = install("cn", "SET portal \"CN\"\nSET textLocale \"zhCN\"\nSET audioLocale \"zhCN\"\n")
+        ensureGameConfig(root, "1920x1080", null)
+        assertEquals(listOf("SET portal \"CN\""), portals(root))
+    }
+
+    @Test
     fun resolution_alwaysMatchesContainer() {
         val root = install("us", "SET gxFullscreenResolution \"1280x720\"\nSET gxWindowedResolution \"953x720\"\n")
         ensureGameConfig(root, "1920x1080", null)

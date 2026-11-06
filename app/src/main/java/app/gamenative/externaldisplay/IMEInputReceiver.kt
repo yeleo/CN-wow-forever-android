@@ -79,7 +79,7 @@ class IMEInputReceiver(
         
         return object : BaseInputConnection(this, false) {
             override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
-                Timber.d("IMEInputReceiver: commitText called with: '$text'")
+                Timber.d("IMEInputReceiver: commitText called (length=%d)", text?.length ?: 0)
                 text?.let(::typeText)
                 return true
             }
@@ -150,10 +150,12 @@ class IMEInputReceiver(
             xServer.keyboard.onKeyEvent(upEvent)
 
             Timber.v(
-                "IMEInputReceiver: Sent char '$char' as keyCode ${keyDispatch.keyCode} (shift=${keyDispatch.requiresShift})",
+                "IMEInputReceiver: Sent key event (keyCode=%d, shift=%b)",
+                keyDispatch.keyCode,
+                keyDispatch.requiresShift,
             )
         } else {
-            Timber.w("IMEInputReceiver: Could not map character '$char' to keyCode")
+            Timber.w("IMEInputReceiver: Could not map character to keyCode")
         }
     }
 
