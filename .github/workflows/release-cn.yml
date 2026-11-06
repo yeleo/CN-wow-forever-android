@@ -23,8 +23,10 @@ jobs:
           distribution: 'temurin'
           cache: 'gradle'
 
-      - name: Accept Android SDK Licenses
-        run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+      - name: Configure Android SDK & local.properties
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
       - name: Fetch & Verify Runtime Components
         run: |

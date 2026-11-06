@@ -21,3 +21,9 @@ dependencyResolutionManagement {
 
 rootProject.name = "wow-forever-android"
 include(":app")
+
+// Ensure local.properties exists to satisfy secrets-gradle-plugin and AGP on clean checkouts
+val localProps = java.io.File(rootDir, "local.properties")
+if (!localProps.exists()) {
+    localProps.createNewFile()
+}
