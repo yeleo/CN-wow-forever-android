@@ -9,7 +9,7 @@ import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.widget.Toast
+import app.gamenative.ui.util.SnackbarManager
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -381,7 +381,7 @@ fun BattleNetWebAuthDialog(
                                             if (!st.isNullOrBlank()) {
                                                 BattleNetSignIn.saveWebToken(context, st)
                                                 hasCapturedToken = true
-                                                Toast.makeText(context, "已捕获并保存国服战网 SSO Token！", Toast.LENGTH_SHORT).show()
+                                                SnackbarManager.show("已捕获并保存国服战网 SSO Token！")
                                             }
                                         } catch (_: Exception) {}
                                     }
