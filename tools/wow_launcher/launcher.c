@@ -200,6 +200,13 @@ static void MarkScanned(const char *name) {
     }
 }
 
+static const wchar_t *s_companionDlls[] = {
+    L"G:\\_forever_\\wow_loader.dll",
+    L"G:\\_forever_\\libxell.dll",
+    L"G:\\_forever_\\GFSDK_Aftermath_Lib.x64.dll",
+    L"G:\\_forever_\\BlizzardError.exe"
+};
+
 static DWORD RvaToOffset(DWORD rva, IMAGE_SECTION_HEADER *sections, WORD numSections) {
     if (rva == 0) return 0;
     for (WORD i = 0; i < numSections; i++) {
@@ -218,23 +225,6 @@ static DWORD RvaToOffset(DWORD rva, IMAGE_SECTION_HEADER *sections, WORD numSect
 #ifndef IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT
 #define IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT 13
 #endif
-
-typedef struct _IMAGE_DELAYLOAD_DESCRIPTOR {
-    union {
-        DWORD AllAttributes;
-        struct {
-            DWORD RvaBased : 1;
-            DWORD Reserved : 31;
-        } DllAttributes;
-    } Attributes;
-    DWORD DllNameRVA;
-    DWORD ModuleHandleRVA;
-    DWORD ImportAddressTableRVA;
-    DWORD ImportNameTableRVA;
-    DWORD BoundImportAddressTableRVA;
-    DWORD UnloadInformationTableRVA;
-    DWORD TimeDateStamp;
-} IMAGE_DELAYLOAD_DESCRIPTOR;
 
 static void ScanPEImports(const wchar_t *filePath, const char *parentLabel, int depth) {
     if (depth > 3 || s_scannedCount >= 64) return;
@@ -727,21 +717,15 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
         ScanPEImports(GAME_X64_EXE_PATH, "Wow.exe", 1);
 
         // Also proactively scan dependencies of known companion binaries in G:\_forever_\
-        static const wchar_t *companionDlls[] = {
-            L"G:\\_forever_\\wow_loader.dll",
-            L"G:\\_forever_\\libxell.dll",
-            L"G:\\_forever_\\GFSDK_Aftermath_Lib.x64.dll",
-            L"G:\\_forever_\\BlizzardError.exe"
-        };
-        for (size_t c = 0; c < sizeof(companionDlls) / sizeof(companionDlls[0]); c++) {
-            if (GetFileAttributesW(companionDlls[c]) != INVALID_FILE_ATTRIBUTES) {
+        for (size_t c = 0; c < sizeof(s_companionDlls) / sizeof(s_companionDlls[0]); c++) {
+            if (GetFileAttributesW(s_companionDlls[c]) != INVALID_FILE_ATTRIBUTES) {
                 char label[64] = {0};
-                const wchar_t *fn = wcsrchr(companionDlls[c], L'\\');
-                if (fn) fn++; else fn = companionDlls[c];
+                const wchar_t *fn = wcsrchr(s_companionDlls[c], L'\\');
+                if (fn) fn++; else fn = s_companionDlls[c];
                 WideCharToMultiByte(CP_ACP, 0, fn, -1, label, sizeof(label) - 1, NULL, NULL);
                 if (!HasScanned(label)) {
                     MarkScanned(label);
-                    ScanPEImports(companionDlls[c], label, 1);
+                    ScanPEImports(s_companionDlls[c], label, 1);
                 }
             }
         }
