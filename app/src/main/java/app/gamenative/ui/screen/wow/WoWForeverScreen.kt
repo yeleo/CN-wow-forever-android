@@ -1433,6 +1433,35 @@ private fun prepareLaunch(context: Context, gameRoot: File, gpu: GpuProfile, scr
         LauncherDebugLogger.logException("P2_PREPARE", "InjectFEXCore", e)
     }
 
+    // 1b. Replenish essential Proton ARM64 builtin DLLs in system32 if missing or corrupted
+    try {
+        val protonDir = File(ImageFs.getSharedProtonDir(context), PROTON_VERSION)
+        val candidateDirs = listOf(
+            File(protonDir, "lib/wine/aarch64-windows"),
+            File(protonDir, "lib64/wine/aarch64-windows")
+        )
+        for (srcDir in candidateDirs) {
+            if (srcDir.isDirectory) {
+                val essentialDlls = listOf(
+                    "crypt32.dll", "bcrypt.dll", "rsaenh.dll", "cryptnet.dll",
+                    "secur32.dll", "ncrypt.dll", "ucrtbase.dll", "kernel32.dll",
+                    "kernelbase.dll", "advapi32.dll"
+                )
+                for (dll in essentialDlls) {
+                    val srcFile = File(srcDir, dll)
+                    val dstFile = File(sys32, dll)
+                    if (srcFile.exists() && (!dstFile.exists() || dstFile.length() == 0L || dstFile.length() != srcFile.length())) {
+                        FileUtils.copy(srcFile, dstFile)
+                        LauncherDebugLogger.log("P2_PREPARE", "Replenished proton builtin $dll to system32 (${dstFile.length()} bytes)")
+                    }
+                }
+                break
+            }
+        }
+    } catch (e: Exception) {
+        LauncherDebugLogger.logException("P2_PREPARE", "ReplenishProtonDlls", e)
+    }
+
     // 2. Restore/ensure system32 has native ARM64 DXVK (so explorer.exe & Wow-Launcher-ARM64.exe start cleanly)
     try {
         val arm64DxvkDir = File(ContentsManager.getContentTypeDir(context, ContentProfile.ContentType.CONTENT_TYPE_DXVK), DXVK_VERSION)

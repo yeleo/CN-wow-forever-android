@@ -92,14 +92,39 @@ static void TrimString(char *s) {
     }
 }
 
+typedef BOOL (WINAPI *CryptProtectData_fn)(
+    DATA_BLOB *pDataIn,
+    LPCWSTR szDataDescr,
+    DATA_BLOB *pOptionalEntropy,
+    PVOID pvReserved,
+    CRYPTPROTECT_PROMPTSTRUCT *pPromptStruct,
+    DWORD dwFlags,
+    DATA_BLOB *pDataOut
+);
+
 static BOOL ProtectDataBuffer(const char *plainText, DATA_BLOB *pOut) {
+    HMODULE hCrypt = LoadLibraryW(L"crypt32.dll");
+    if (!hCrypt) {
+        hCrypt = LoadLibraryW(L"C:\\windows\\system32\\crypt32.dll");
+    }
+    if (!hCrypt) {
+        LogRaw("[WARN] crypt32.dll could not be loaded for CryptProtectData");
+        return FALSE;
+    }
+
+    CryptProtectData_fn pCryptProtectData = (CryptProtectData_fn)GetProcAddress(hCrypt, "CryptProtectData");
+    if (!pCryptProtectData) {
+        LogRaw("[WARN] GetProcAddress('CryptProtectData') failed");
+        return FALSE;
+    }
+
     DATA_BLOB in;
     DATA_BLOB entropy;
     in.pbData = (BYTE *)plainText;
     in.cbData = (DWORD)strlen(plainText);
     entropy.pbData = (BYTE *)ENTROPY;
     entropy.cbData = sizeof(ENTROPY);
-    return CryptProtectData(&in, NULL, &entropy, NULL, NULL, 0, pOut);
+    return pCryptProtectData(&in, NULL, &entropy, NULL, NULL, 0, pOut);
 }
 
 static void ShredAndDeleteTokenFile(void) {

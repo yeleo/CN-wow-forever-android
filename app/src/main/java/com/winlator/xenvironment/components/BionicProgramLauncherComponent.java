@@ -499,8 +499,19 @@ public class BionicProgramLauncherComponent extends GuestProgramLauncherComponen
         String command;
         if (wineInfo.isArm64EC()) {
             command = winePath + "/" + guestExecutable;
-            envVars.put("HODLL", "wowbox64.dll");
-            envVars.put("HODLL64", "wowbox64.dll");
+            File rootDir = environment.getImageFs().getRootDir();
+            File fex64 = new File(rootDir, "home/xuser/.wine/drive_c/windows/system32/libarm64ecfex.dll");
+            if (fex64.exists() || (container != null && "wow_forever".equals(container.id))) {
+                envVars.put("HODLL", "libwow64fex.dll");
+                envVars.put("HODLL64", "libarm64ecfex.dll");
+                envVars.put("FEX_TSOENABLED", "1");
+                envVars.put("FEX_HALFBARRIERTSOENABLED", "1");
+                envVars.put("FEX_MULTIBLOCK", "0");
+                envVars.put("FEX_VECTORTSOENABLED", "1");
+            } else {
+                envVars.put("HODLL", "wowbox64.dll");
+                envVars.put("HODLL64", "wowbox64.dll");
+            }
         }
         else
             command = binDir + "/box64 " + guestExecutable;
