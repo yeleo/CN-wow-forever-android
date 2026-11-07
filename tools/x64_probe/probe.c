@@ -98,7 +98,6 @@ void __cdecl mainCRTStartup(void) {
     ExitProcess(0);
 }
 
-int main(void) {
-    mainCRTStartup();
-    return 0;
+/* Empty stub for GCC/Clang MinGW internal initialization */
+void __main(void) {
 }
