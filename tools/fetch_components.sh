@@ -100,13 +100,16 @@ else
         echo "$FEXCORE_SHA256  $TMP_DIR/fexcore.wcp" | shasum -a 256 -c -
     fi
 
-    # Unpack FEXCore DLLs to assets for direct injection into system32
-    tar -I zstd -xf "$TMP_DIR/fexcore.wcp" -C "$TMP_DIR" ./system32/libarm64ecfex.dll ./system32/libwow64fex.dll
-    cp "$TMP_DIR/system32/libarm64ecfex.dll" "$FEX_ASSETS/libarm64ecfex.dll"
-    cp "$TMP_DIR/system32/libwow64fex.dll" "$FEX_ASSETS/libwow64fex.dll"
+    # FEXCore-2608-stable.wcp from upstream is a tar.xz archive. Extract using tar -xJf
+    mkdir -p "$TMP_DIR/staging"
+    tar -xJf "$TMP_DIR/fexcore.wcp" -C "$TMP_DIR/staging"
 
-    cp "$TMP_DIR/fexcore.wcp" "$DEST/fexcore-2608.wcp"
-    cp "$TMP_DIR/fexcore.wcp" "$DEST/FEXCore-2608-stable.wcp"
+    cp "$TMP_DIR/staging/system32/libarm64ecfex.dll" "$FEX_ASSETS/libarm64ecfex.dll"
+    cp "$TMP_DIR/staging/system32/libwow64fex.dll" "$FEX_ASSETS/libwow64fex.dll"
+
+    # Repack as standard zstd .wcp so TarCompressorUtils.Type.ZSTD can unpack it on device
+    (cd "$TMP_DIR/staging" && tar -I zstd -cf "$DEST/fexcore-2608.wcp" profile.json system32/libarm64ecfex.dll system32/libwow64fex.dll)
+    cp "$DEST/fexcore-2608.wcp" "$DEST/FEXCore-2608-stable.wcp"
     rm -rf "$TMP_DIR"
     echo "Created fexcore-2608.wcp and extracted assets successfully"
 fi
