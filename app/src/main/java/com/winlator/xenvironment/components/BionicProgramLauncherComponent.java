@@ -393,7 +393,7 @@ public class BionicProgramLauncherComponent extends GuestProgramLauncherComponen
 
         if (wineInfo != null && wineInfo.isArm64EC()) {
             if (!envVars.has("WINEDEBUG") || envVars.get("WINEDEBUG").equals("-all")) {
-                envVars.put("WINEDEBUG", "err+all,warn+module,+loaddll");
+                envVars.put("WINEDEBUG", "err+all,warn+module,+loaddll,+seh");
             }
         }
 
@@ -467,8 +467,21 @@ public class BionicProgramLauncherComponent extends GuestProgramLauncherComponen
             Log.e("BionicProgramLauncherComponent", "Failed to init linux_wine_boot.log: " + e.getMessage());
         }
 
+        java.util.concurrent.atomic.AtomicInteger sehCount = new java.util.concurrent.atomic.AtomicInteger(0);
         ProcessHelper.addDebugCallback(line -> {
             try {
+                if (line.contains(":seh:")) {
+                    int count = sehCount.incrementAndGet();
+                    if (count > 5000) {
+                        if (count == 5001) {
+                            java.io.FileWriter fw = new java.io.FileWriter(linuxWineBootLog, true);
+                            fw.write("[SEH_THROTTLE] Maximum 5000 lines of :seh: debug logs reached; further SEH entries suppressed.\n");
+                            fw.flush();
+                            fw.close();
+                        }
+                        return;
+                    }
+                }
                 java.io.FileWriter fw = new java.io.FileWriter(linuxWineBootLog, true);
                 fw.write(line + "\n");
                 fw.flush();
@@ -509,8 +522,12 @@ public class BionicProgramLauncherComponent extends GuestProgramLauncherComponen
                 envVars.put("HODLL64", "libarm64ecfex.dll");
                 envVars.put("FEX_TSOENABLED", "1");
                 envVars.put("FEX_HALFBARRIERTSOENABLED", "1");
-                envVars.put("FEX_MULTIBLOCK", "0");
-                envVars.put("FEX_VECTORTSOENABLED", "1");
+                envVars.put("FEX_MULTIBLOCK", "1");
+                envVars.put("FEX_VECTORTSOENABLED", "0");
+                envVars.put("FEX_MEMCPYSETTSOENABLED", "1");
+                envVars.put("FEX_SMCCHECKS", "full");
+                envVars.put("FEX_HIDEHYPERVISORBIT", "1");
+                envVars.put("FEX_HIDEHYBRID", "1");
             } else {
                 envVars.put("HODLL", "wowbox64.dll");
                 envVars.put("HODLL64", "wowbox64.dll");

@@ -251,6 +251,63 @@ static DWORD RvaToOffset(DWORD rva, IMAGE_SECTION_HEADER *sections, WORD numSect
 #define IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT 13
 #endif
 
+static void LogPEHeaderDetails(const wchar_t *path, const char *label) {
+    HANDLE hFile = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) return;
+
+    IMAGE_DOS_HEADER dos;
+    DWORD bytesRead = 0;
+    if (!ReadFile(hFile, &dos, sizeof(dos), &bytesRead, NULL) || bytesRead != sizeof(dos) || dos.e_magic != IMAGE_DOS_SIGNATURE) {
+        CloseHandle(hFile);
+        return;
+    }
+
+    if (dos.e_lfanew <= 0 || SetFilePointer(hFile, dos.e_lfanew, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER) {
+        CloseHandle(hFile);
+        return;
+    }
+
+    DWORD ntSig = 0;
+    if (!ReadFile(hFile, &ntSig, sizeof(ntSig), &bytesRead, NULL) || bytesRead != sizeof(ntSig) || ntSig != IMAGE_NT_SIGNATURE) {
+        CloseHandle(hFile);
+        return;
+    }
+
+    IMAGE_FILE_HEADER fileHeader;
+    if (!ReadFile(hFile, &fileHeader, sizeof(fileHeader), &bytesRead, NULL) || bytesRead != sizeof(fileHeader)) {
+        CloseHandle(hFile);
+        return;
+    }
+
+    if (fileHeader.Machine == IMAGE_FILE_MACHINE_AMD64) {
+        IMAGE_OPTIONAL_HEADER64 opt;
+        if (ReadFile(hFile, &opt, sizeof(opt), &bytesRead, NULL) && bytesRead == sizeof(opt)) {
+            char buf[512] = {0};
+            snprintf(buf, sizeof(buf), "[PE_HEADER] %s: Machine=0x%04X EntryPoint=0x%08lX ImageBase=0x%llX StackReserve=0x%llX StackCommit=0x%llX",
+                     label, fileHeader.Machine, (unsigned long)opt.AddressOfEntryPoint,
+                     (unsigned long long)opt.ImageBase,
+                     (unsigned long long)opt.SizeOfStackReserve,
+                     (unsigned long long)opt.SizeOfStackCommit);
+            LogRaw(buf);
+
+            DWORD tlsRva = opt.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS].VirtualAddress;
+            DWORD tlsSize = opt.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS].Size;
+            DWORD delayRva = opt.DataDirectory[IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT].VirtualAddress;
+            DWORD delaySize = opt.DataDirectory[IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT].Size;
+            DWORD secRva = opt.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY].VirtualAddress;
+            DWORD secSize = opt.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY].Size;
+
+            char dirBuf[512] = {0};
+            snprintf(dirBuf, sizeof(dirBuf), "[PE_HEADER] %s: TLS=(RVA 0x%08lX, Size %lu) DelayImport=(RVA 0x%08lX, Size %lu) Security=(RVA 0x%08lX, Size %lu)",
+                     label, (unsigned long)tlsRva, (unsigned long)tlsSize,
+                     (unsigned long)delayRva, (unsigned long)delaySize,
+                     (unsigned long)secRva, (unsigned long)secSize);
+            LogRaw(dirBuf);
+        }
+    }
+    CloseHandle(hFile);
+}
+
 static void ScanPEImports(const wchar_t *filePath, const char *parentLabel, int depth) {
     if (depth > 3 || s_scannedCount >= 64) return;
 
@@ -812,12 +869,17 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
         SetEnvironmentVariableW(L"HODLL64", L"libarm64ecfex.dll");
         SetEnvironmentVariableW(L"FEX_TSOENABLED", L"1");
         SetEnvironmentVariableW(L"FEX_HALFBARRIERTSOENABLED", L"1");
-        SetEnvironmentVariableW(L"FEX_MULTIBLOCK", L"0");
-        SetEnvironmentVariableW(L"FEX_VECTORTSOENABLED", L"1");
+        SetEnvironmentVariableW(L"FEX_MULTIBLOCK", L"1");
+        SetEnvironmentVariableW(L"FEX_VECTORTSOENABLED", L"0");
+        SetEnvironmentVariableW(L"FEX_MEMCPYSETTSOENABLED", L"1");
+        SetEnvironmentVariableW(L"FEX_SMCCHECKS", L"full");
+        SetEnvironmentVariableW(L"FEX_HIDEHYPERVISORBIT", L"1");
+        SetEnvironmentVariableW(L"FEX_HIDEHYBRID", L"1");
         SetEnvironmentVariableW(L"WINEDLLOVERRIDES", L"d3d11,dxgi=n,b");
-        LogRaw("[ENV_SET] Configured FEXCore and WINEDLLOVERRIDES=d3d11,dxgi=n,b for x64 execution");
+        LogRaw("[ENV_SET] Configured FEXCore (SMCCHECKS=full, MULTIBLOCK=1, HIDEHYPERVISOR) and WINEDLLOVERRIDES=d3d11,dxgi=n,b for x64 execution");
 
-        LogRaw("=== RECURSIVE PE IMPORT SCAN (Wow.exe) ===");
+        LogRaw("=== PE HEADER & IMPORT SCAN (Wow.exe) ===");
+        LogPEHeaderDetails(GAME_X64_EXE_PATH, "Wow.exe");
         s_scannedCount = 0;
         MarkScanned("Wow.exe");
         ScanPEImports(GAME_X64_EXE_PATH, "Wow.exe", 1);
@@ -839,8 +901,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
         RunX64ProbeIfPresent();
     }
 
-    // Step 7: Configure Wine debug stderr redirection
-    SetEnvironmentVariableW(L"WINEDEBUG", L"err+all,warn+module,+loaddll");
+    // Step 7: Configure Wine debug stderr redirection (including +seh for exception tracing)
+    SetEnvironmentVariableW(L"WINEDEBUG", L"err+all,warn+module,+loaddll,+seh");
 
     // Rotate/truncate wine_debug.log if > 20MB
     HANDLE hCheck = CreateFileW(WINE_DEBUG_LOG_PATH, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
