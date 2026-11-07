@@ -1466,6 +1466,20 @@ private fun prepareLaunch(context: Context, gameRoot: File, gpu: GpuProfile, scr
             LauncherDebugLogger.logException("P2_PREPARE", "ExtractWrapper", e)
         }
 
+        // Deploy x64_probe.exe to gameRoot/_forever_/ if present in assets
+        try {
+            val probeFile = File(gameRoot, "$FLAVOR_DIR/x64_probe.exe")
+            context.assets.open("x64_probe.exe").use { input ->
+                probeFile.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+            probeFile.setExecutable(true, false)
+            LauncherDebugLogger.log("P2_PREPARE", "Extracted x64_probe.exe to ${probeFile.path} (${probeFile.length()} bytes)")
+        } catch (e: Exception) {
+            Timber.w(e, "x64_probe.exe not present in assets or failed to extract")
+        }
+
         // Stage bnet_token.tmp to fixed location: E:\bnet_token.tmp (/data/data/app.wowforever/storage/bnet_token.tmp)
         try {
             val storageDir = File(context.filesDir.parentFile, "storage")

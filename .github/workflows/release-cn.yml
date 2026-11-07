@@ -34,7 +34,7 @@ jobs:
           chmod +x tools/fetch_components.sh
           ./tools/fetch_components.sh
 
-      - name: Build WoW ARM64 Launcher Wrapper (llvm-mingw aarch64)
+      - name: Build WoW ARM64 Launcher Wrapper & x64 Probe (llvm-mingw)
         run: |
           LLVM_MINGW_VER="20261104"
           LLVM_MINGW_TAR="llvm-mingw-${LLVM_MINGW_VER}-ucrt-ubuntu-22.04-x86_64.tar.xz"
@@ -52,8 +52,13 @@ jobs:
           export PATH="/opt/llvm-mingw/bin:$PATH"
           mkdir -p app/src/main/assets
 
+          # Build ARM64 wrapper
           aarch64-w64-mingw32-clang -O2 -s -static -o app/src/main/assets/Wow-Launcher-ARM64.exe tools/wow_launcher/launcher.c -lcrypt32 -ladvapi32 -lkernel32
           ls -la app/src/main/assets/Wow-Launcher-ARM64.exe
+
+          # Build x86_64 diagnostic probe
+          x86_64-w64-mingw32-clang -O2 -s -static -o app/src/main/assets/x64_probe.exe tools/x64_probe/probe.c -lkernel32
+          ls -la app/src/main/assets/x64_probe.exe
 
       - name: Build APK (assembleModernRelease)
         run: |

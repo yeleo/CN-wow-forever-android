@@ -9,32 +9,25 @@
  * Wow-Launcher-ARM64.exe
  * Native ARM64 Windows wrapper for World of Warcraft (CN Region).
  * 
- * 1. Reads ST token from E:\bnet_token.tmp (Android app private storage mapping).
- * 2. Parses account_id from ST (CN-<32hex>-<accountId>).
- * 3. Encrypts ACCOUNT (placeholder), ACCOUNT_STATE (JSON), and WEB_TOKEN (ST)
- *    using Wine's CryptProtectData with the Blizzard 16-byte entropy.
- * 4. Writes Launch Options to HKCU\Software\Blizzard Entertainment\Battle.net\Launch Options\WoW.
- * 5. Securely shreds and deletes E:\bnet_token.tmp immediately.
- * 6. Launches G:\_forever_\Wow-ARM64.exe with:
- *    -d3d11 -launcherlogin -uid wowf
- *    with lpCurrentDirectory explicitly set to G:\_forever_.
- * 7. Waits for Wow-ARM64.exe to exit and transparently passes through its exit code.
- * 8. Records step milestones and Win32 error codes to G:\_forever_\Logs\launcher_wrapper.log.
+ * Includes comprehensive PE import table scanner, translation layer diagnostics,
+ * x64 environment probing, and Wine stderr redirection.
  */
 
-static const wchar_t* const TOKEN_FILE_PATH   = L"E:\\bnet_token.tmp";
-static const wchar_t* const LOG_DIR_PATH      = L"G:\\_forever_\\Logs";
-static const wchar_t* const LOG_FILE_PATH     = L"G:\\_forever_\\Logs\\launcher_wrapper.log";
-static const wchar_t* const GAME_X64_EXE_PATH = L"G:\\_forever_\\Wow.exe";
+static const wchar_t* const TOKEN_FILE_PATH     = L"E:\\bnet_token.tmp";
+static const wchar_t* const LOG_DIR_PATH        = L"G:\\_forever_\\Logs";
+static const wchar_t* const LOG_FILE_PATH       = L"G:\\_forever_\\Logs\\launcher_wrapper.log";
+static const wchar_t* const WINE_DEBUG_LOG_PATH = L"G:\\_forever_\\Logs\\wine_debug.log";
+static const wchar_t* const PROBE_EXE_PATH      = L"G:\\_forever_\\x64_probe.exe";
+static const wchar_t* const GAME_X64_EXE_PATH   = L"G:\\_forever_\\Wow.exe";
 static const wchar_t* const GAME_ARM64_EXE_PATH = L"G:\\_forever_\\Wow-ARM64.exe";
-static const wchar_t* const X64_FLAG_PATH     = L"G:\\_forever_\\use_x64.flag";
-static const wchar_t* const GAME_WORKING_DIR  = L"G:\\_forever_";
-static const wchar_t* const GAME_X64_CMD_LINE = L"\"G:\\_forever_\\Wow.exe\" -d3d11 -launcherlogin -uid wowf";
+static const wchar_t* const X64_FLAG_PATH       = L"G:\\_forever_\\use_x64.flag";
+static const wchar_t* const GAME_WORKING_DIR    = L"G:\\_forever_";
+static const wchar_t* const GAME_X64_CMD_LINE   = L"\"G:\\_forever_\\Wow.exe\" -d3d11 -launcherlogin -uid wowf";
 static const wchar_t* const GAME_ARM64_CMD_LINE = L"\"G:\\_forever_\\Wow-ARM64.exe\" -d3d11 -launcherlogin -uid wowf";
-static const wchar_t* const REG_KEY_PATH      = L"Software\\Blizzard Entertainment\\Battle.net\\Launch Options\\WoW";
-static const wchar_t* const REG_BNA_KEY_PATH  = L"Software\\Blizzard Entertainment\\Battle.net\\Launch Options\\BNA";
+static const wchar_t* const REG_KEY_PATH        = L"Software\\Blizzard Entertainment\\Battle.net\\Launch Options\\WoW";
+static const wchar_t* const REG_BNA_KEY_PATH    = L"Software\\Blizzard Entertainment\\Battle.net\\Launch Options\\BNA";
 
-static const char* const PLACEHOLDER_ACCOUNT  = "wowf_cn_user@battlenet.com.cn";
+static const char* const PLACEHOLDER_ACCOUNT    = "wowf_cn_user@battlenet.com.cn";
 
 static const BYTE ENTROPY[16] = {
     0xC8, 0x76, 0xF4, 0xAE, 0x4C, 0x95, 0x2E, 0xFE,
@@ -56,6 +49,38 @@ static void LogStep(const char *stepName, DWORD win32ErrorCode) {
     }
 
     fprintf(fp, "[%s] [%s] win32_err=%lu\n", timeBuf, stepName, win32ErrorCode);
+    fflush(fp);
+    fclose(fp);
+}
+
+static void LogExitCode(const char *tag, DWORD exitCode) {
+    const char *desc = "";
+    if (exitCode == 0xC0000135) desc = " [STATUS_DLL_NOT_FOUND]";
+    else if (exitCode == 0xC0000142) desc = " [STATUS_DLL_INIT_FAILED]";
+    else if (exitCode == 0xC000007B) desc = " [STATUS_INVALID_IMAGE_FORMAT]";
+    else if (exitCode == 0xC0000005) desc = " [STATUS_ACCESS_VIOLATION]";
+    else if (exitCode == 0) desc = " [STATUS_SUCCESS]";
+
+    FILE *fp = _wfopen(LOG_FILE_PATH, L"a");
+    if (!fp) return;
+    time_t now = time(NULL);
+    struct tm *t = localtime(&now);
+    char timeBuf[64] = {0};
+    if (t) strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", t);
+    fprintf(fp, "[%s] [%s] exit_code=%lu (0x%08lX)%s\n", timeBuf, tag, (unsigned long)exitCode, (unsigned long)exitCode, desc);
+    fflush(fp);
+    fclose(fp);
+}
+
+static void LogRaw(const char *msg) {
+    CreateDirectoryW(LOG_DIR_PATH, NULL);
+    FILE *fp = _wfopen(LOG_FILE_PATH, L"a");
+    if (!fp) return;
+    time_t now = time(NULL);
+    struct tm *t = localtime(&now);
+    char timeBuf[64] = {0};
+    if (t) strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", t);
+    fprintf(fp, "[%s] %s\n", timeBuf, msg);
     fflush(fp);
     fclose(fp);
 }
@@ -97,6 +122,331 @@ static void ShredAndDeleteTokenFile(void) {
     }
     DeleteFileW(TOKEN_FILE_PATH);
 }
+
+/* ========================================================================= */
+/* PE Parsing and Import Table Scanner                                      */
+/* ========================================================================= */
+
+static WORD GetPEFileMachine(const wchar_t *path) {
+    HANDLE hFile = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) return 0;
+
+    IMAGE_DOS_HEADER dos;
+    DWORD bytesRead = 0;
+    if (!ReadFile(hFile, &dos, sizeof(dos), &bytesRead, NULL) || bytesRead != sizeof(dos) || dos.e_magic != IMAGE_DOS_SIGNATURE) {
+        CloseHandle(hFile);
+        return 0;
+    }
+
+    if (SetFilePointer(hFile, dos.e_lfanew, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER) {
+        CloseHandle(hFile);
+        return 0;
+    }
+
+    DWORD ntSig = 0;
+    if (!ReadFile(hFile, &ntSig, sizeof(ntSig), &bytesRead, NULL) || bytesRead != sizeof(ntSig) || ntSig != IMAGE_NT_SIGNATURE) {
+        CloseHandle(hFile);
+        return 0;
+    }
+
+    IMAGE_FILE_HEADER fileHeader;
+    if (!ReadFile(hFile, &fileHeader, sizeof(fileHeader), &bytesRead, NULL) || bytesRead != sizeof(fileHeader)) {
+        CloseHandle(hFile);
+        return 0;
+    }
+
+    CloseHandle(hFile);
+    return fileHeader.Machine;
+}
+
+static BOOL SearchDLL(const wchar_t *dllNameW, wchar_t *outFoundPath, size_t outSize, WORD *outMachine) {
+    static const wchar_t *searchDirs[] = {
+        L"G:\\_forever_\\",
+        L"G:\\_forever_\\D3D12\\",
+        L"C:\\windows\\system32\\"
+    };
+
+    for (size_t i = 0; i < sizeof(searchDirs) / sizeof(searchDirs[0]); i++) {
+        wchar_t candidate[512] = {0};
+        _snwprintf(candidate, sizeof(candidate) / sizeof(wchar_t) - 1, L"%ls%ls", searchDirs[i], dllNameW);
+        DWORD attr = GetFileAttributesW(candidate);
+        if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+            if (outFoundPath) {
+                wcsncpy(outFoundPath, candidate, outSize - 1);
+            }
+            if (outMachine) {
+                *outMachine = GetPEFileMachine(candidate);
+            }
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static char s_scannedModules[64][64];
+static int s_scannedCount = 0;
+
+static BOOL HasScanned(const char *name) {
+    for (int i = 0; i < s_scannedCount; i++) {
+        if (_stricmp(s_scannedModules[i], name) == 0) return TRUE;
+    }
+    return FALSE;
+}
+
+static void MarkScanned(const char *name) {
+    if (s_scannedCount < 64) {
+        strncpy(s_scannedModules[s_scannedCount], name, sizeof(s_scannedModules[0]) - 1);
+        s_scannedCount++;
+    }
+}
+
+static DWORD RvaToOffset(DWORD rva, IMAGE_SECTION_HEADER *sections, WORD numSections) {
+    for (WORD i = 0; i < numSections; i++) {
+        DWORD secVa = sections[i].VirtualAddress;
+        DWORD secSize = sections[i].Misc.VirtualSize;
+        if (rva >= secVa && rva < secVa + secSize) {
+            return sections[i].PointerToRawData + (rva - secVa);
+        }
+    }
+    return 0;
+}
+
+static void ScanPEImports(const wchar_t *filePath, const char *parentLabel, int depth) {
+    if (depth > 3 || s_scannedCount >= 64) return;
+
+    HANDLE hFile = CreateFileW(filePath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) return;
+
+    DWORD fileSize = GetFileSize(hFile, NULL);
+    if (fileSize < sizeof(IMAGE_DOS_HEADER) + sizeof(IMAGE_NT_HEADERS64)) {
+        CloseHandle(hFile);
+        return;
+    }
+
+    IMAGE_DOS_HEADER dos;
+    DWORD bytesRead = 0;
+    if (!ReadFile(hFile, &dos, sizeof(dos), &bytesRead, NULL) || bytesRead != sizeof(dos) || dos.e_magic != IMAGE_DOS_SIGNATURE) {
+        CloseHandle(hFile);
+        return;
+    }
+
+    if (dos.e_lfanew <= 0 || (DWORD)dos.e_lfanew + sizeof(IMAGE_NT_HEADERS64) > fileSize) {
+        CloseHandle(hFile);
+        return;
+    }
+
+    if (SetFilePointer(hFile, dos.e_lfanew, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER) {
+        CloseHandle(hFile);
+        return;
+    }
+
+    DWORD ntSig = 0;
+    if (!ReadFile(hFile, &ntSig, sizeof(ntSig), &bytesRead, NULL) || bytesRead != sizeof(ntSig) || ntSig != IMAGE_NT_SIGNATURE) {
+        CloseHandle(hFile);
+        return;
+    }
+
+    IMAGE_FILE_HEADER fileHeader;
+    if (!ReadFile(hFile, &fileHeader, sizeof(fileHeader), &bytesRead, NULL) || bytesRead != sizeof(fileHeader)) {
+        CloseHandle(hFile);
+        return;
+    }
+
+    DWORD importRva = 0;
+    DWORD importSize = 0;
+
+    if (fileHeader.SizeOfOptionalHeader >= sizeof(IMAGE_OPTIONAL_HEADER64)) {
+        IMAGE_OPTIONAL_HEADER64 opt64;
+        if (ReadFile(hFile, &opt64, sizeof(opt64), &bytesRead, NULL) && bytesRead == sizeof(opt64)) {
+            if (opt64.NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_IMPORT) {
+                importRva = opt64.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
+                importSize = opt64.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].Size;
+            }
+        }
+    } else if (fileHeader.SizeOfOptionalHeader >= sizeof(IMAGE_OPTIONAL_HEADER32)) {
+        IMAGE_OPTIONAL_HEADER32 opt32;
+        if (ReadFile(hFile, &opt32, sizeof(opt32), &bytesRead, NULL) && bytesRead == sizeof(opt32)) {
+            if (opt32.NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_IMPORT) {
+                importRva = opt32.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
+                importSize = opt32.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].Size;
+            }
+        }
+    }
+
+    if (importRva == 0 || importSize == 0) {
+        CloseHandle(hFile);
+        return;
+    }
+
+    // Read section headers
+    DWORD secPos = dos.e_lfanew + sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER) + fileHeader.SizeOfOptionalHeader;
+    if (SetFilePointer(hFile, secPos, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER) {
+        CloseHandle(hFile);
+        return;
+    }
+
+    WORD numSections = fileHeader.NumberOfSections;
+    if (numSections > 96) numSections = 96;
+    IMAGE_SECTION_HEADER sections[96];
+    DWORD secBytes = numSections * sizeof(IMAGE_SECTION_HEADER);
+    if (!ReadFile(hFile, sections, secBytes, &bytesRead, NULL) || bytesRead != secBytes) {
+        CloseHandle(hFile);
+        return;
+    }
+
+    DWORD importOffset = RvaToOffset(importRva, sections, numSections);
+    if (importOffset == 0 || importOffset >= fileSize) {
+        CloseHandle(hFile);
+        return;
+    }
+
+    char recursePaths[16][MAX_PATH];
+    char recurseNames[16][64];
+    int recurseCount = 0;
+
+    for (DWORD i = 0; i < 64; i++) {
+        DWORD descOffset = importOffset + i * sizeof(IMAGE_IMPORT_DESCRIPTOR);
+        if (descOffset + sizeof(IMAGE_IMPORT_DESCRIPTOR) > fileSize) break;
+
+        if (SetFilePointer(hFile, descOffset, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER) break;
+        IMAGE_IMPORT_DESCRIPTOR desc;
+        if (!ReadFile(hFile, &desc, sizeof(desc), &bytesRead, NULL) || bytesRead != sizeof(desc)) break;
+        if (desc.Name == 0 && desc.FirstThunk == 0) break;
+
+        DWORD nameOffset = RvaToOffset(desc.Name, sections, numSections);
+        if (nameOffset == 0 || nameOffset >= fileSize) continue;
+
+        if (SetFilePointer(hFile, nameOffset, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER) continue;
+        char dllName[64] = {0};
+        ReadFile(hFile, dllName, sizeof(dllName) - 1, &bytesRead, NULL);
+        dllName[sizeof(dllName) - 1] = '\0';
+
+        wchar_t dllNameW[64] = {0};
+        MultiByteToWideChar(CP_ACP, 0, dllName, -1, dllNameW, sizeof(dllNameW) / sizeof(wchar_t) - 1);
+
+        wchar_t foundPath[512] = {0};
+        WORD machine = 0;
+        BOOL found = SearchDLL(dllNameW, foundPath, sizeof(foundPath) / sizeof(wchar_t), &machine);
+
+        char logLine[256] = {0};
+        if (found) {
+            snprintf(logLine, sizeof(logLine), "[IMPORT_FOUND] parent=%s dll=%s machine=0x%04X", parentLabel, dllName, machine);
+            LogRaw(logLine);
+
+            // If found in G:\_forever_\, queue for recursive scan
+            if (depth < 3 && wcsstr(foundPath, L"G:\\_forever_\\") != NULL && !HasScanned(dllName)) {
+                MarkScanned(dllName);
+                if (recurseCount < 16) {
+                    WideCharToMultiByte(CP_ACP, 0, foundPath, -1, recursePaths[recurseCount], MAX_PATH - 1, NULL, NULL);
+                    strncpy(recurseNames[recurseCount], dllName, sizeof(recurseNames[0]) - 1);
+                    recurseCount++;
+                }
+            }
+        } else {
+            snprintf(logLine, sizeof(logLine), "[IMPORT_NOT_FOUND] parent=%s dll=%s", parentLabel, dllName);
+            LogRaw(logLine);
+        }
+    }
+
+    CloseHandle(hFile);
+
+    for (int r = 0; r < recurseCount; r++) {
+        wchar_t rPathW[MAX_PATH] = {0};
+        MultiByteToWideChar(CP_ACP, 0, recursePaths[r], -1, rPathW, MAX_PATH - 1);
+        ScanPEImports(rPathW, recurseNames[r], depth + 1);
+    }
+}
+
+/* ========================================================================= */
+/* System32 and Environment Diagnostics                                      */
+/* ========================================================================= */
+
+static void RunSystem32AndEnvDiagnostics(void) {
+    LogRaw("=== SYSTEM32 TRANSLATION & GRAPHICS DLL DIAGNOSTICS ===");
+    static const wchar_t *sysDlls[] = {
+        L"wowbox64.dll",
+        L"d3d11.dll",
+        L"dxgi.dll",
+        L"d3d12.dll",
+        L"xtajit.dll",
+        L"libwow64fex.dll",
+        L"libarm64ecfex.dll",
+        L"ucrtbase.dll",
+        L"vcruntime140.dll"
+    };
+
+    for (size_t i = 0; i < sizeof(sysDlls) / sizeof(sysDlls[0]); i++) {
+        wchar_t fullPath[MAX_PATH] = {0};
+        _snwprintf(fullPath, MAX_PATH - 1, L"C:\\windows\\system32\\%ls", sysDlls[i]);
+        DWORD attr = GetFileAttributesW(fullPath);
+        BOOL exists = (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY));
+        WORD machine = exists ? GetPEFileMachine(fullPath) : 0;
+
+        char logLine[128] = {0};
+        snprintf(logLine, sizeof(logLine), "[SYS32_CHECK] file=%ls exists=%d machine=0x%04X", sysDlls[i], exists, machine);
+        LogRaw(logLine);
+    }
+
+    LogRaw("=== ENVIRONMENT VARIABLE DIAGNOSTICS ===");
+    LPWCH envBlock = GetEnvironmentStringsW();
+    if (envBlock) {
+        LPWCH var = envBlock;
+        while (*var) {
+            if (wcsncmp(var, L"HODLL", 5) == 0 ||
+                wcsncmp(var, L"BOX64_", 6) == 0 ||
+                wcsncmp(var, L"WINEDEBUG", 9) == 0) {
+                char logLine[256] = {0};
+                snprintf(logLine, sizeof(logLine), "[ENV_CHECK] %ls", var);
+                LogRaw(logLine);
+            }
+            var += wcslen(var) + 1;
+        }
+        FreeEnvironmentStringsW(envBlock);
+    }
+}
+
+/* ========================================================================= */
+/* x64 Probe Invocation                                                     */
+/* ========================================================================= */
+
+static void RunX64ProbeIfPresent(void) {
+    if (GetFileAttributesW(PROBE_EXE_PATH) == INVALID_FILE_ATTRIBUTES) {
+        LogRaw("[PROBE_SKIPPED] G:\\_forever_\\x64_probe.exe not found");
+        return;
+    }
+
+    LogRaw("[PROBE_START] Launching x64 probe test...");
+    STARTUPINFOW si;
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&pi, sizeof(pi));
+
+    wchar_t probeCmd[512] = {0};
+    _snwprintf(probeCmd, sizeof(probeCmd) / sizeof(wchar_t) - 1, L"\"%ls\"", PROBE_EXE_PATH);
+
+    if (CreateProcessW(PROBE_EXE_PATH, probeCmd, NULL, NULL, FALSE, 0, NULL, GAME_WORKING_DIR, &si, &pi)) {
+        DWORD waitResult = WaitForSingleObject(pi.hProcess, 10000);
+        DWORD exitCode = 0;
+        GetExitCodeProcess(pi.hProcess, &exitCode);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+
+        char logLine[128] = {0};
+        snprintf(logLine, sizeof(logLine), "[PROBE_EXIT] wait=%lu exit_code=%lu (0x%08lX)", waitResult, (unsigned long)exitCode, (unsigned long)exitCode);
+        LogRaw(logLine);
+    } else {
+        DWORD err = GetLastError();
+        char logLine[128] = {0};
+        snprintf(logLine, sizeof(logLine), "[PROBE_CREATE_FAILED] win32_err=%lu", err);
+        LogRaw(logLine);
+    }
+}
+
+/* ========================================================================= */
+/* Main Entry Point                                                         */
+/* ========================================================================= */
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine, int nCmdShow) {
     LogStep("WRAPPER_START", 0);
@@ -158,38 +508,31 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     DATA_BLOB stateBlob = {0};
 
     if (!ProtectDataBuffer(token, &tokenBlob)) {
-        DWORD err = GetLastError();
-        LogStep("DPAPI_WEB_TOKEN_FAILED", err);
+        LogStep("ENCRYPT_TOKEN_FAILED", GetLastError());
         return 20;
     }
 
     if (!ProtectDataBuffer(PLACEHOLDER_ACCOUNT, &accountBlob)) {
-        DWORD err = GetLastError();
         LocalFree(tokenBlob.pbData);
-        LogStep("DPAPI_ACCOUNT_FAILED", err);
+        LogStep("ENCRYPT_ACCOUNT_FAILED", GetLastError());
         return 21;
     }
 
     if (!ProtectDataBuffer(accountStateJson, &stateBlob)) {
-        DWORD err = GetLastError();
         LocalFree(tokenBlob.pbData);
         LocalFree(accountBlob.pbData);
-        LogStep("DPAPI_ACCOUNT_STATE_FAILED", err);
+        LogStep("ENCRYPT_STATE_FAILED", GetLastError());
         return 22;
     }
+
     LogStep("DPAPI_ENCRYPT_SUCCESS", 0);
 
-    // Step 5b: Detect Launch Target (x64 Wow.exe vs ARM64 Wow-ARM64.exe)
-    BOOL useX64 = FALSE;
-    if (GetFileAttributesW(GAME_X64_EXE_PATH) != INVALID_FILE_ATTRIBUTES ||
-        GetFileAttributesW(X64_FLAG_PATH) != INVALID_FILE_ATTRIBUTES) {
-        useX64 = TRUE;
-        LogStep("LAUNCH_TARGET_X64", 0);
-    } else {
-        LogStep("LAUNCH_TARGET_ARM64", 0);
-    }
+    // Step 6: Determine target architecture (prefer x64 if Wow.exe or flag exists)
+    BOOL hasX64Exe = (GetFileAttributesW(GAME_X64_EXE_PATH) != INVALID_FILE_ATTRIBUTES);
+    BOOL hasX64Flag = (GetFileAttributesW(X64_FLAG_PATH) != INVALID_FILE_ATTRIBUTES);
+    BOOL useX64 = (hasX64Exe || hasX64Flag);
 
-    // Step 6: Write Registry
+    // Step 6a: Write Launch Options\WoW Registry Keys
     HKEY hKey = NULL;
     DWORD disposition = 0;
     LSTATUS regStatus = RegCreateKeyExW(
@@ -212,12 +555,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
         return 30;
     }
 
-    // Write REG_BINARY DPAPI blobs
     RegSetValueExW(hKey, L"WEB_TOKEN", 0, REG_BINARY, tokenBlob.pbData, tokenBlob.cbData);
     RegSetValueExW(hKey, L"ACCOUNT", 0, REG_BINARY, accountBlob.pbData, accountBlob.cbData);
     RegSetValueExW(hKey, L"ACCOUNT_STATE", 0, REG_BINARY, stateBlob.pbData, stateBlob.cbData);
 
-    // Write REG_SZ String values
     RegSetValueExA(hKey, "ACCOUNT_TS", 0, REG_SZ, (const BYTE *)timestampStr, (DWORD)(strlen(timestampStr) + 1));
     RegSetValueExA(hKey, "REGION", 0, REG_SZ, (const BYTE *)"CN", 3);
     RegSetValueExA(hKey, "LOCALE", 0, REG_SZ, (const BYTE *)"zhCN", 5);
@@ -280,10 +621,54 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     RegCloseKey(hBnaKey);
     LogStep("REG_BNA_WRITE_SUCCESS", 0);
 
-    // Step 7: Launch target game executable
+    // Step 6c: Diagnostics & Probing
+    RunSystem32AndEnvDiagnostics();
+
+    if (useX64) {
+        LogRaw("=== RECURSIVE PE IMPORT SCAN (Wow.exe) ===");
+        s_scannedCount = 0;
+        MarkScanned("Wow.exe");
+        ScanPEImports(GAME_X64_EXE_PATH, "Wow.exe", 1);
+        RunX64ProbeIfPresent();
+    }
+
+    // Step 7: Configure Wine debug stderr redirection
+    SetEnvironmentVariableW(L"WINEDEBUG", L"err+all,+loaddll,+module");
+
+    // Rotate/truncate wine_debug.log if > 20MB
+    HANDLE hCheck = CreateFileW(WINE_DEBUG_LOG_PATH, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    if (hCheck != INVALID_HANDLE_VALUE) {
+        DWORD fSize = GetFileSize(hCheck, NULL);
+        CloseHandle(hCheck);
+        if (fSize > 20 * 1024 * 1024) {
+            DeleteFileW(WINE_DEBUG_LOG_PATH);
+            LogRaw("[WINE_DEBUG_LOG] Truncated wine_debug.log exceeding 20MB");
+        }
+    }
+
+    SECURITY_ATTRIBUTES sa;
+    ZeroMemory(&sa, sizeof(sa));
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+
+    HANDLE hWineStderr = CreateFileW(
+        WINE_DEBUG_LOG_PATH,
+        FILE_APPEND_DATA,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        &sa,
+        OPEN_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        NULL
+    );
+
     STARTUPINFOW si;
     ZeroMemory(&si, sizeof(si));
     si.cb = sizeof(si);
+    if (hWineStderr != INVALID_HANDLE_VALUE) {
+        si.dwFlags |= STARTF_USESTDHANDLES;
+        si.hStdError = hWineStderr;
+        si.hStdOutput = hWineStderr;
+    }
 
     PROCESS_INFORMATION pi;
     ZeroMemory(&pi, sizeof(pi));
@@ -300,13 +685,17 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
         cmdLine,
         NULL,
         NULL,
-        FALSE,
+        TRUE, // Inherit handles for stderr redirection
         0,
         NULL,
         GAME_WORKING_DIR,
         &si,
         &pi
     );
+
+    if (hWineStderr != INVALID_HANDLE_VALUE) {
+        CloseHandle(hWineStderr);
+    }
 
     if (!created) {
         DWORD err = GetLastError();
@@ -327,11 +716,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
 
-    LogStep("GAME_PROCESS_EXITED", exitCode);
+    LogExitCode("GAME_PROCESS_EXITED", exitCode);
     return (int)exitCode;
 }
 
 int main(int argc, char *argv[]) {
     return wWinMain(GetModuleHandle(NULL), NULL, GetCommandLineW(), SW_SHOWDEFAULT);
 }
-
