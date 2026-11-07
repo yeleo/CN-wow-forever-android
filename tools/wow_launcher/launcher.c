@@ -29,6 +29,7 @@ static const wchar_t* const GAME_EXE_PATH     = L"G:\\_forever_\\Wow-ARM64.exe";
 static const wchar_t* const GAME_WORKING_DIR  = L"G:\\_forever_";
 static const wchar_t* const GAME_CMD_LINE     = L"\"G:\\_forever_\\Wow-ARM64.exe\" -d3d11 -launcherlogin -uid wowf";
 static const wchar_t* const REG_KEY_PATH      = L"Software\\Blizzard Entertainment\\Battle.net\\Launch Options\\WoW";
+static const wchar_t* const REG_BNA_KEY_PATH  = L"Software\\Blizzard Entertainment\\Battle.net\\Launch Options\\BNA";
 
 static const char* const PLACEHOLDER_ACCOUNT  = "wowf_cn_user@battlenet.com.cn";
 
@@ -220,6 +221,48 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     LocalFree(stateBlob.pbData);
     LogStep("REG_WRITE_SUCCESS", 0);
 
+    // Step 6b: Write Launch Options\BNA Registry Keys
+    HKEY hBnaKey = NULL;
+    DWORD bnaDisposition = 0;
+    LSTATUS bnaStatus = RegCreateKeyExW(
+        HKEY_CURRENT_USER,
+        REG_BNA_KEY_PATH,
+        0,
+        NULL,
+        REG_OPTION_NON_VOLATILE,
+        KEY_WRITE,
+        NULL,
+        &hBnaKey,
+        &bnaDisposition
+    );
+
+    if (bnaStatus != ERROR_SUCCESS) {
+        LogStep("REG_CREATE_BNA_KEY_FAILED", (DWORD)bnaStatus);
+        return 31;
+    }
+
+    static const struct {
+        const char *name;
+        const char *value;
+    } bnaValues[] = {
+        {"CONNECTION_STRING_CN",  "cn.actual.battlenet.com.cn"},
+        {"CONNECTION_STRING_CXX", "cn-ptr.actual.battle.net"},
+        {"CONNECTION_STRING_EU",  "eu.actual.battle.net"},
+        {"CONNECTION_STRING_KR",  "kr.actual.battle.net"},
+        {"CONNECTION_STRING_US",  "us.actual.battle.net"},
+        {"CONNECTION_STRING_XX",  "test.actual.battle.net"}
+    };
+
+    for (size_t i = 0; i < sizeof(bnaValues) / sizeof(bnaValues[0]); ++i) {
+        RegSetValueExA(hBnaKey, bnaValues[i].name, 0, REG_SZ,
+                       (const BYTE *)bnaValues[i].value,
+                       (DWORD)(strlen(bnaValues[i].value) + 1));
+    }
+
+    RegFlushKey(hBnaKey);
+    RegCloseKey(hBnaKey);
+    LogStep("REG_BNA_WRITE_SUCCESS", 0);
+
     // Step 7: Launch Wow-ARM64.exe
     STARTUPINFOW si;
     ZeroMemory(&si, sizeof(si));
@@ -251,7 +294,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
         return 40;
     }
 
-    LogStep("GAME_PROCESS_STARTED", pi.dwProcessId);
+    LogStep("GAME_PROCESS_STARTED", 0);
 
     // Step 8: Wait for Wow-ARM64.exe to exit and forward exit code
     WaitForSingleObject(pi.hProcess, INFINITE);

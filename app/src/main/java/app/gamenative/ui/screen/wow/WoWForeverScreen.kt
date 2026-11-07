@@ -1353,6 +1353,29 @@ private fun prepareLaunch(context: Context, gameRoot: File, gpu: GpuProfile, scr
         throw e
     }
 
+    try {
+        val configWtf = File(gameRoot, CONFIG_WTF)
+        if (configWtf.exists()) {
+            val relevantLines = configWtf.readLines()
+                .map { it.trim() }
+                .filter { line ->
+                    if (!line.startsWith("SET ", ignoreCase = true)) return@filter false
+                    val parts = line.split("\\s+".toRegex(), limit = 3)
+                    if (parts.size >= 2) {
+                        val key = parts[1]
+                        val isRelevant = key.contains("portal", ignoreCase = true) || key.contains("locale", ignoreCase = true)
+                        val isSafe = !key.contains("account", ignoreCase = true) && !key.contains("user", ignoreCase = true) && !key.contains("email", ignoreCase = true)
+                        isRelevant && isSafe
+                    } else false
+                }
+            LauncherDebugLogger.log("P2_CONFIG_WTF", "Config.wtf inspected [portal/locale keys]: ${relevantLines.joinToString(", ")}")
+        } else {
+            LauncherDebugLogger.log("P2_CONFIG_WTF", "Config.wtf does not exist at ${configWtf.path}")
+        }
+    } catch (e: Exception) {
+        LauncherDebugLogger.log("P2_CONFIG_WTF", "Failed to inspect Config.wtf: ${e.message}")
+    }
+
     val arm64Exe = File(gameRoot, "$FLAVOR_DIR/$EXE_NAME")
     val currentRegion = GameRegion.saved(context) ?: GameRegion.current(context, gameRoot.path)
     val webToken = BattleNetSignIn.loadWebToken(context)
