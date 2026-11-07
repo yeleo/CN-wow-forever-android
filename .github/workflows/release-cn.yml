@@ -33,6 +33,10 @@ jobs:
           which zstd >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y zstd; }
           chmod +x tools/fetch_components.sh
           ./tools/fetch_components.sh
+          echo "=== Verifying Runtime Assets ==="
+          file app/src/main/assets/fexcore/*.dll
+          file app/src/main/assets/dxvk_x64/*.dll
+          ls -la app/src/main/assets/bundled_components
 
       - name: Build WoW ARM64 Launcher Wrapper & x64 Probe (llvm-mingw)
         run: |

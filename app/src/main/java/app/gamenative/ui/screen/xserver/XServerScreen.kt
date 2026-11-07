@@ -3604,17 +3604,16 @@ private fun setupXEnvironment(
     val enableWineDebug = PrefManager.enableWineDebug
     val enableBox86Logs = WinlatorPrefManager.getBoolean("enable_box86_64_logs", false)
     val wineDebugChannels = PrefManager.wineDebugChannels
-    // explicitly enable or disable Wine debug channels
-    envVars.put(
-        "WINEDEBUG",
-        if (enableWineDebug && wineDebugChannels.isNotEmpty())
-            "+" + wineDebugChannels.replace(",", ",+")
-        else
-            "-all",
-    )
-    // capture debug output to file if either Wine or Box86/64 logging is enabled
+    val isWowContainer = container.name.contains("WoW", ignoreCase = true) || container.id == 1
+    val wineDebugVal = when {
+        enableWineDebug && wineDebugChannels.isNotEmpty() -> "+" + wineDebugChannels.replace(",", ",+")
+        isWowContainer -> "err+all,warn+module,+loaddll"
+        else -> "-all"
+    }
+    envVars.put("WINEDEBUG", wineDebugVal)
+    // capture debug output to file if either Wine or Box86/64 logging is enabled or for WoW container
     var logFile: File? = null
-    val captureLogs = enableWineDebug || enableBox86Logs
+    val captureLogs = enableWineDebug || enableBox86Logs || isWowContainer || wineDebugVal != "-all"
     if (captureLogs) {
         val wineLogDir = File(context.getExternalFilesDir(null), "wine_logs")
         wineLogDir.mkdirs()

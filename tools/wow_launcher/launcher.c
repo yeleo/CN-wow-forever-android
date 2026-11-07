@@ -201,15 +201,40 @@ static void MarkScanned(const char *name) {
 }
 
 static DWORD RvaToOffset(DWORD rva, IMAGE_SECTION_HEADER *sections, WORD numSections) {
+    if (rva == 0) return 0;
     for (WORD i = 0; i < numSections; i++) {
         DWORD secVa = sections[i].VirtualAddress;
         DWORD secSize = sections[i].Misc.VirtualSize;
-        if (rva >= secVa && rva < secVa + secSize) {
+        DWORD rawSize = sections[i].SizeOfRawData;
+        DWORD extent = secSize > rawSize ? secSize : rawSize;
+        if (extent == 0) extent = rawSize;
+        if (rva >= secVa && rva < secVa + extent) {
             return sections[i].PointerToRawData + (rva - secVa);
         }
     }
     return 0;
 }
+
+#ifndef IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT
+#define IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT 13
+#endif
+
+typedef struct _IMAGE_DELAYLOAD_DESCRIPTOR {
+    union {
+        DWORD AllAttributes;
+        struct {
+            DWORD RvaBased : 1;
+            DWORD Reserved : 31;
+        } DllAttributes;
+    } Attributes;
+    DWORD DllNameRVA;
+    DWORD ModuleHandleRVA;
+    DWORD ImportAddressTableRVA;
+    DWORD ImportNameTableRVA;
+    DWORD BoundImportAddressTableRVA;
+    DWORD UnloadInformationTableRVA;
+    DWORD TimeDateStamp;
+} IMAGE_DELAYLOAD_DESCRIPTOR;
 
 static void ScanPEImports(const wchar_t *filePath, const char *parentLabel, int depth) {
     if (depth > 3 || s_scannedCount >= 64) return;
@@ -254,6 +279,8 @@ static void ScanPEImports(const wchar_t *filePath, const char *parentLabel, int 
 
     DWORD importRva = 0;
     DWORD importSize = 0;
+    DWORD delayRva = 0;
+    DWORD delaySize = 0;
 
     if (fileHeader.SizeOfOptionalHeader >= sizeof(IMAGE_OPTIONAL_HEADER64)) {
         IMAGE_OPTIONAL_HEADER64 opt64;
@@ -261,6 +288,10 @@ static void ScanPEImports(const wchar_t *filePath, const char *parentLabel, int 
             if (opt64.NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_IMPORT) {
                 importRva = opt64.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
                 importSize = opt64.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].Size;
+            }
+            if (opt64.NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT) {
+                delayRva = opt64.DataDirectory[IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT].VirtualAddress;
+                delaySize = opt64.DataDirectory[IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT].Size;
             }
         }
     } else if (fileHeader.SizeOfOptionalHeader >= sizeof(IMAGE_OPTIONAL_HEADER32)) {
@@ -270,10 +301,14 @@ static void ScanPEImports(const wchar_t *filePath, const char *parentLabel, int 
                 importRva = opt32.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
                 importSize = opt32.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].Size;
             }
+            if (opt32.NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT) {
+                delayRva = opt32.DataDirectory[IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT].VirtualAddress;
+                delaySize = opt32.DataDirectory[IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT].Size;
+            }
         }
     }
 
-    if (importRva == 0 || importSize == 0) {
+    if (importRva == 0 && delayRva == 0) {
         CloseHandle(hFile);
         return;
     }
@@ -294,57 +329,108 @@ static void ScanPEImports(const wchar_t *filePath, const char *parentLabel, int 
         return;
     }
 
-    DWORD importOffset = RvaToOffset(importRva, sections, numSections);
-    if (importOffset == 0 || importOffset >= fileSize) {
-        CloseHandle(hFile);
-        return;
-    }
-
     char recursePaths[16][MAX_PATH];
     char recurseNames[16][64];
     int recurseCount = 0;
 
-    for (DWORD i = 0; i < 64; i++) {
-        DWORD descOffset = importOffset + i * sizeof(IMAGE_IMPORT_DESCRIPTOR);
-        if (descOffset + sizeof(IMAGE_IMPORT_DESCRIPTOR) > fileSize) break;
+    // 1. Scan Standard Imports
+    if (importRva != 0 && importSize != 0) {
+        DWORD importOffset = RvaToOffset(importRva, sections, numSections);
+        if (importOffset != 0 && importOffset < fileSize) {
+            for (DWORD i = 0; i < 128; i++) {
+                DWORD descOffset = importOffset + i * sizeof(IMAGE_IMPORT_DESCRIPTOR);
+                if (descOffset + sizeof(IMAGE_IMPORT_DESCRIPTOR) > fileSize) break;
 
-        if (SetFilePointer(hFile, descOffset, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER) break;
-        IMAGE_IMPORT_DESCRIPTOR desc;
-        if (!ReadFile(hFile, &desc, sizeof(desc), &bytesRead, NULL) || bytesRead != sizeof(desc)) break;
-        if (desc.Name == 0 && desc.FirstThunk == 0) break;
+                if (SetFilePointer(hFile, descOffset, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER) break;
+                IMAGE_IMPORT_DESCRIPTOR desc;
+                if (!ReadFile(hFile, &desc, sizeof(desc), &bytesRead, NULL) || bytesRead != sizeof(desc)) break;
+                if (desc.Name == 0 && desc.FirstThunk == 0 && desc.OriginalFirstThunk == 0) break;
+                if (desc.Name == 0) continue;
 
-        DWORD nameOffset = RvaToOffset(desc.Name, sections, numSections);
-        if (nameOffset == 0 || nameOffset >= fileSize) continue;
+                DWORD nameOffset = RvaToOffset(desc.Name, sections, numSections);
+                if (nameOffset == 0 || nameOffset >= fileSize) continue;
 
-        if (SetFilePointer(hFile, nameOffset, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER) continue;
-        char dllName[64] = {0};
-        ReadFile(hFile, dllName, sizeof(dllName) - 1, &bytesRead, NULL);
-        dllName[sizeof(dllName) - 1] = '\0';
+                if (SetFilePointer(hFile, nameOffset, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER) continue;
+                char dllName[64] = {0};
+                ReadFile(hFile, dllName, sizeof(dllName) - 1, &bytesRead, NULL);
+                dllName[sizeof(dllName) - 1] = '\0';
 
-        wchar_t dllNameW[64] = {0};
-        MultiByteToWideChar(CP_ACP, 0, dllName, -1, dllNameW, sizeof(dllNameW) / sizeof(wchar_t) - 1);
+                wchar_t dllNameW[64] = {0};
+                MultiByteToWideChar(CP_ACP, 0, dllName, -1, dllNameW, sizeof(dllNameW) / sizeof(wchar_t) - 1);
 
-        wchar_t foundPath[512] = {0};
-        WORD machine = 0;
-        BOOL found = SearchDLL(dllNameW, foundPath, sizeof(foundPath) / sizeof(wchar_t), &machine);
+                wchar_t foundPath[512] = {0};
+                WORD machine = 0;
+                BOOL found = SearchDLL(dllNameW, foundPath, sizeof(foundPath) / sizeof(wchar_t), &machine);
 
-        char logLine[256] = {0};
-        if (found) {
-            snprintf(logLine, sizeof(logLine), "[IMPORT_FOUND] parent=%s dll=%s machine=0x%04X", parentLabel, dllName, machine);
-            LogRaw(logLine);
+                char logLine[256] = {0};
+                if (found) {
+                    snprintf(logLine, sizeof(logLine), "[IMPORT_FOUND] parent=%s dll=%s machine=0x%04X", parentLabel, dllName, machine);
+                    LogRaw(logLine);
 
-            // If found in G:\_forever_\, queue for recursive scan
-            if (depth < 3 && wcsstr(foundPath, L"G:\\_forever_\\") != NULL && !HasScanned(dllName)) {
-                MarkScanned(dllName);
-                if (recurseCount < 16) {
-                    WideCharToMultiByte(CP_ACP, 0, foundPath, -1, recursePaths[recurseCount], MAX_PATH - 1, NULL, NULL);
-                    strncpy(recurseNames[recurseCount], dllName, sizeof(recurseNames[0]) - 1);
-                    recurseCount++;
+                    // If found in G:\_forever_\, queue for recursive scan
+                    if (depth < 3 && wcsstr(foundPath, L"G:\\_forever_\\") != NULL && !HasScanned(dllName)) {
+                        MarkScanned(dllName);
+                        if (recurseCount < 16) {
+                            WideCharToMultiByte(CP_ACP, 0, foundPath, -1, recursePaths[recurseCount], MAX_PATH - 1, NULL, NULL);
+                            strncpy(recurseNames[recurseCount], dllName, sizeof(recurseNames[0]) - 1);
+                            recurseCount++;
+                        }
+                    }
+                } else {
+                    snprintf(logLine, sizeof(logLine), "[IMPORT_NOT_FOUND] parent=%s dll=%s", parentLabel, dllName);
+                    LogRaw(logLine);
                 }
             }
-        } else {
-            snprintf(logLine, sizeof(logLine), "[IMPORT_NOT_FOUND] parent=%s dll=%s", parentLabel, dllName);
-            LogRaw(logLine);
+        }
+    }
+
+    // 2. Scan Delay-Load Imports
+    if (delayRva != 0 && delaySize != 0) {
+        DWORD delayOffset = RvaToOffset(delayRva, sections, numSections);
+        if (delayOffset != 0 && delayOffset < fileSize) {
+            for (DWORD i = 0; i < 128; i++) {
+                DWORD descOffset = delayOffset + i * sizeof(IMAGE_DELAYLOAD_DESCRIPTOR);
+                if (descOffset + sizeof(IMAGE_DELAYLOAD_DESCRIPTOR) > fileSize) break;
+
+                if (SetFilePointer(hFile, descOffset, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER) break;
+                IMAGE_DELAYLOAD_DESCRIPTOR delayDesc;
+                if (!ReadFile(hFile, &delayDesc, sizeof(delayDesc), &bytesRead, NULL) || bytesRead != sizeof(delayDesc)) break;
+                if (delayDesc.DllNameRVA == 0) break;
+
+                DWORD nameOffset = RvaToOffset(delayDesc.DllNameRVA, sections, numSections);
+                if (nameOffset == 0 || nameOffset >= fileSize) continue;
+
+                if (SetFilePointer(hFile, nameOffset, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER) continue;
+                char dllName[64] = {0};
+                ReadFile(hFile, dllName, sizeof(dllName) - 1, &bytesRead, NULL);
+                dllName[sizeof(dllName) - 1] = '\0';
+
+                wchar_t dllNameW[64] = {0};
+                MultiByteToWideChar(CP_ACP, 0, dllName, -1, dllNameW, sizeof(dllNameW) / sizeof(wchar_t) - 1);
+
+                wchar_t foundPath[512] = {0};
+                WORD machine = 0;
+                BOOL found = SearchDLL(dllNameW, foundPath, sizeof(foundPath) / sizeof(wchar_t), &machine);
+
+                char logLine[256] = {0};
+                if (found) {
+                    snprintf(logLine, sizeof(logLine), "[DELAY_IMPORT_FOUND] parent=%s dll=%s machine=0x%04X", parentLabel, dllName, machine);
+                    LogRaw(logLine);
+
+                    // If found in G:\_forever_\, queue for recursive scan
+                    if (depth < 3 && wcsstr(foundPath, L"G:\\_forever_\\") != NULL && !HasScanned(dllName)) {
+                        MarkScanned(dllName);
+                        if (recurseCount < 16) {
+                            WideCharToMultiByte(CP_ACP, 0, foundPath, -1, recursePaths[recurseCount], MAX_PATH - 1, NULL, NULL);
+                            strncpy(recurseNames[recurseCount], dllName, sizeof(recurseNames[0]) - 1);
+                            recurseCount++;
+                        }
+                    }
+                } else {
+                    snprintf(logLine, sizeof(logLine), "[DELAY_IMPORT_NOT_FOUND] parent=%s dll=%s", parentLabel, dllName);
+                    LogRaw(logLine);
+                }
+            }
         }
     }
 
@@ -394,6 +480,7 @@ static void RunSystem32AndEnvDiagnostics(void) {
         while (*var) {
             if (wcsncmp(var, L"HODLL", 5) == 0 ||
                 wcsncmp(var, L"BOX64_", 6) == 0 ||
+                wcsncmp(var, L"FEX_", 4) == 0 ||
                 wcsncmp(var, L"WINEDEBUG", 9) == 0) {
                 char logLine[256] = {0};
                 snprintf(logLine, sizeof(logLine), "[ENV_CHECK] %ls", var);
@@ -449,6 +536,15 @@ static void RunX64ProbeIfPresent(void) {
 /* ========================================================================= */
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine, int nCmdShow) {
+    // Step 0: Ensure child processes inherit FEXCore translation and full WINEDEBUG logging
+    SetEnvironmentVariableW(L"WINEDEBUG", L"err+all,warn+module,+loaddll");
+    SetEnvironmentVariableW(L"HODLL", L"libwow64fex.dll");
+    SetEnvironmentVariableW(L"HODLL64", L"libarm64ecfex.dll");
+    SetEnvironmentVariableW(L"FEX_TSOENABLED", L"1");
+    SetEnvironmentVariableW(L"FEX_HALFBARRIERTSOENABLED", L"1");
+    SetEnvironmentVariableW(L"FEX_MULTIBLOCK", L"0");
+    SetEnvironmentVariableW(L"FEX_VECTORTSOENABLED", L"1");
+
     LogStep("WRAPPER_START", 0);
 
     // Step 1: Open token file
@@ -629,11 +725,32 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
         s_scannedCount = 0;
         MarkScanned("Wow.exe");
         ScanPEImports(GAME_X64_EXE_PATH, "Wow.exe", 1);
+
+        // Also proactively scan dependencies of known companion binaries in G:\_forever_\
+        static const wchar_t *companionDlls[] = {
+            L"G:\\_forever_\\wow_loader.dll",
+            L"G:\\_forever_\\libxell.dll",
+            L"G:\\_forever_\\GFSDK_Aftermath_Lib.x64.dll",
+            L"G:\\_forever_\\BlizzardError.exe"
+        };
+        for (size_t c = 0; c < sizeof(companionDlls) / sizeof(companionDlls[0]); c++) {
+            if (GetFileAttributesW(companionDlls[c]) != INVALID_FILE_ATTRIBUTES) {
+                char label[64] = {0};
+                const wchar_t *fn = wcsrchr(companionDlls[c], L'\\');
+                if (fn) fn++; else fn = companionDlls[c];
+                WideCharToMultiByte(CP_ACP, 0, fn, -1, label, sizeof(label) - 1, NULL, NULL);
+                if (!HasScanned(label)) {
+                    MarkScanned(label);
+                    ScanPEImports(companionDlls[c], label, 1);
+                }
+            }
+        }
+
         RunX64ProbeIfPresent();
     }
 
     // Step 7: Configure Wine debug stderr redirection
-    SetEnvironmentVariableW(L"WINEDEBUG", L"err+all,+loaddll,+module");
+    SetEnvironmentVariableW(L"WINEDEBUG", L"err+all,warn+module,+loaddll");
 
     // Rotate/truncate wine_debug.log if > 20MB
     HANDLE hCheck = CreateFileW(WINE_DEBUG_LOG_PATH, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);

@@ -133,6 +133,7 @@ public class BionicProgramLauncherComponent extends GuestProgramLauncherComponen
             } else {
                 extractBox64Files();
             }
+            ensureFexCoreAndDxvkDlls();
             if (preUnpack != null) preUnpack.run();
             pid = execGuestProgram();
             Log.d("BionicProgramLauncherComponent", "Process " + pid + " started");
@@ -390,6 +391,12 @@ public class BionicProgramLauncherComponent extends GuestProgramLauncherComponen
             envVars.putAll(this.envVars);
         }
 
+        if (wineInfo != null && wineInfo.isArm64EC()) {
+            if (!envVars.has("WINEDEBUG") || envVars.get("WINEDEBUG").equals("-all")) {
+                envVars.put("WINEDEBUG", "err+all,warn+module,+loaddll");
+            }
+        }
+
         if (BuildConfig.XR_BUILD) {
             String shimPath = context.getApplicationInfo().nativeLibraryDir + "/libkgslshim.so";
             if (new File(shimPath).exists()) {
@@ -459,10 +466,14 @@ public class BionicProgramLauncherComponent extends GuestProgramLauncherComponen
             command = winePath + "/" + guestExecutable;
             File rootDir = environment.getImageFs().getRootDir();
             File system32dir = new File(rootDir, "home/xuser/.wine/drive_c/windows/system32");
-            boolean hasFex = new File(system32dir, "libwow64fex.dll").exists();
-            if (emulator.equalsIgnoreCase("fexcore") && hasFex) {
+            boolean hasFex = new File(system32dir, "libwow64fex.dll").exists() || new File(system32dir, "libarm64ecfex.dll").exists();
+            if (emulator.equalsIgnoreCase("fexcore") || hasFex) {
                 envVars.put("HODLL", "libwow64fex.dll");
-                envVars.put("HODLL64", "libwow64fex.dll");
+                envVars.put("HODLL64", "libarm64ecfex.dll");
+                envVars.put("FEX_TSOENABLED", "1");
+                envVars.put("FEX_HALFBARRIERTSOENABLED", "1");
+                envVars.put("FEX_MULTIBLOCK", "0");
+                envVars.put("FEX_VECTORTSOENABLED", "1");
             } else {
                 envVars.put("HODLL", "wowbox64.dll");
                 envVars.put("HODLL64", "wowbox64.dll");
@@ -471,6 +482,57 @@ public class BionicProgramLauncherComponent extends GuestProgramLauncherComponen
         else
             command = binDir + "/box64 " + guestExecutable;
         return command;
+    }
+
+    private void ensureFexCoreAndDxvkDlls() {
+        Context context = environment.getContext();
+        File rootDir = environment.getImageFs().getRootDir();
+        File system32dir = new File(rootDir, "home/xuser/.wine/drive_c/windows/system32");
+        if (!system32dir.exists()) {
+            system32dir.mkdirs();
+        }
+
+        // Copy FEXCore translation DLLs (libarm64ecfex.dll & libwow64fex.dll) to system32
+        try {
+            String[] fexFiles = {"libarm64ecfex.dll", "libwow64fex.dll"};
+            for (String f : fexFiles) {
+                File target = new File(system32dir, f);
+                try (java.io.InputStream in = context.getAssets().open("fexcore/" + f);
+                     java.io.FileOutputStream out = new java.io.FileOutputStream(target)) {
+                    byte[] buf = new byte[8192];
+                    int len;
+                    while ((len = in.read(buf)) != -1) {
+                        out.write(buf, 0, len);
+                    }
+                    Log.i("BionicProgramLauncherComponent", "Copied " + f + " to " + target.getAbsolutePath() + " (" + target.length() + " bytes)");
+                } catch (java.io.FileNotFoundException e) {
+                    Log.w("BionicProgramLauncherComponent", "Asset fexcore/" + f + " not found: " + e.getMessage());
+                }
+            }
+        } catch (Exception e) {
+            Log.e("BionicProgramLauncherComponent", "Failed to copy FEXCore DLLs to system32", e);
+        }
+
+        // Copy x64 DXVK DLLs (d3d11.dll & dxgi.dll) to system32
+        try {
+            String[] dxvkFiles = {"d3d11.dll", "dxgi.dll"};
+            for (String f : dxvkFiles) {
+                File target = new File(system32dir, f);
+                try (java.io.InputStream in = context.getAssets().open("dxvk_x64/" + f);
+                     java.io.FileOutputStream out = new java.io.FileOutputStream(target)) {
+                    byte[] buf = new byte[8192];
+                    int len;
+                    while ((len = in.read(buf)) != -1) {
+                        out.write(buf, 0, len);
+                    }
+                    Log.i("BionicProgramLauncherComponent", "Copied x64 DXVK " + f + " to " + target.getAbsolutePath() + " (" + target.length() + " bytes)");
+                } catch (java.io.FileNotFoundException e) {
+                    Log.w("BionicProgramLauncherComponent", "Asset dxvk_x64/" + f + " not found: " + e.getMessage());
+                }
+            }
+        } catch (Exception e) {
+            Log.e("BionicProgramLauncherComponent", "Failed to copy x64 DXVK DLLs to system32", e);
+        }
     }
 
     private void extractBox64Files() {

@@ -1412,19 +1412,43 @@ private fun prepareLaunch(context: Context, gameRoot: File, gpu: GpuProfile, scr
         }
     }
 
-    if (useX64) {
-        // Inject x64 DXVK directly to system32 if already extracted
-        val dxvkX64Dir = File(ContentsManager.getContentTypeDir(context, ContentProfile.ContentType.CONTENT_TYPE_DXVK), DXVK_X64_VERSION)
-        val d3d11 = File(dxvkX64Dir, "system32/d3d11.dll")
-        val dxgi = File(dxvkX64Dir, "system32/dxgi.dll")
-        if (d3d11.exists() && dxgi.exists()) {
-            val imageFs = ImageFs.find(context)
-            val sys32 = File(imageFs.rootDir, "${ImageFs.WINEPREFIX}/drive_c/windows/system32")
-            if (sys32.isDirectory) {
-                FileUtils.copy(d3d11, File(sys32, "d3d11.dll"))
-                FileUtils.copy(dxgi, File(sys32, "dxgi.dll"))
-                LauncherDebugLogger.log("P2_PREPARE", "Injected x64 DXVK (d3d11.dll & dxgi.dll) to system32")
+    val imageFs = ImageFs.find(context)
+    val sys32 = File(imageFs.rootDir, "${ImageFs.WINEPREFIX}/drive_c/windows/system32")
+    if (!sys32.exists()) sys32.mkdirs()
+
+    // 1. Ensure FEXCore translation DLLs in system32
+    try {
+        listOf("libarm64ecfex.dll", "libwow64fex.dll").forEach { dllName ->
+            val target = File(sys32, dllName)
+            try {
+                context.assets.open("fexcore/$dllName").use { input ->
+                    target.outputStream().use { output -> input.copyTo(output) }
+                }
+                LauncherDebugLogger.log("P2_PREPARE", "Injected FEXCore asset $dllName to ${target.path} (${target.length()} bytes)")
+            } catch (e: Exception) {
+                LauncherDebugLogger.log("P2_PREPARE", "FEXCore asset fexcore/$dllName not found: ${e.message}")
             }
+        }
+    } catch (e: Exception) {
+        LauncherDebugLogger.logException("P2_PREPARE", "InjectFEXCore", e)
+    }
+
+    // 2. Ensure x64 DXVK DLLs in system32 for x64 Wow
+    if (useX64) {
+        try {
+            listOf("d3d11.dll", "dxgi.dll").forEach { dllName ->
+                val target = File(sys32, dllName)
+                try {
+                    context.assets.open("dxvk_x64/$dllName").use { input ->
+                        target.outputStream().use { output -> input.copyTo(output) }
+                    }
+                    LauncherDebugLogger.log("P2_PREPARE", "Injected x64 DXVK asset $dllName to ${target.path} (${target.length()} bytes)")
+                } catch (e: Exception) {
+                    LauncherDebugLogger.log("P2_PREPARE", "x64 DXVK asset dxvk_x64/$dllName not found: ${e.message}")
+                }
+            }
+        } catch (e: Exception) {
+            LauncherDebugLogger.logException("P2_PREPARE", "InjectDXVK_x64", e)
         }
     }
 
@@ -1498,7 +1522,8 @@ private fun prepareLaunch(context: Context, gameRoot: File, gpu: GpuProfile, scr
 
 private fun containerConfig(gameRoot: File, gpu: GpuProfile, screenSize: String, useWrapper: Boolean, useX64: Boolean = false): JSONObject {
     val samsungEnv = if (Build.MANUFACTURER.equals("samsung", ignoreCase = true)) " FD_DEV_FEATURES=enable_tp_ubwc_flag_hint=1" else ""
-    val envVars = "WRAPPER_MAX_IMAGE_COUNT=0 ZINK_DESCRIPTORS=lazy ZINK_DEBUG=compact,deck_emu MESA_SHADER_CACHE_DISABLE=false MESA_SHADER_CACHE_MAX_SIZE=512MB mesa_glthread=true WINEESYNC=0 MESA_VK_WSI_PRESENT_MODE=mailbox TU_DEBUG=${gpu.tuDebug} VKD3D_SHADER_MODEL=6_0 PULSE_LATENCY_MSEC=144$samsungEnv"
+    val fexEnv = " HODLL=libwow64fex.dll HODLL64=libarm64ecfex.dll FEX_TSOENABLED=1 FEX_HALFBARRIERTSOENABLED=1 FEX_MULTIBLOCK=0 FEX_VECTORTSOENABLED=1 WINEDEBUG=err+all,warn+module,+loaddll"
+    val envVars = "WRAPPER_MAX_IMAGE_COUNT=0 ZINK_DESCRIPTORS=lazy ZINK_DEBUG=compact,deck_emu MESA_SHADER_CACHE_DISABLE=false MESA_SHADER_CACHE_MAX_SIZE=512MB mesa_glthread=true WINEESYNC=0 MESA_VK_WSI_PRESENT_MODE=mailbox TU_DEBUG=${gpu.tuDebug} VKD3D_SHADER_MODEL=6_0 PULSE_LATENCY_MSEC=144$samsungEnv$fexEnv"
     val targetExe = when {
         useWrapper -> "G:\\$FLAVOR_DIR\\Wow-Launcher-ARM64.exe"
         useX64 -> "G:\\$FLAVOR_DIR\\${WowClientDownloader.X64_EXE_NAME}"
@@ -1520,9 +1545,9 @@ private fun containerConfig(gameRoot: File, gpu: GpuProfile, screenSize: String,
         put("dxwrapperConfig", "version=$dxvkVer-1")
         put("wineVersion", "$PROTON_VERSION-1")
         put("containerVariant", "bionic")
-        put("emulator", "box64")
+        put("emulator", "fexcore")
         put("box64Version", "0.4.2")
-        put("fexcoreVersion", "2609-0")
+        put("fexcoreVersion", "2608")
         put("drives", "D:/storage/emulated/0/DownloadE:/data/data/app.wowforever/storageG:${gameRoot.path}")
         put("executablePath", targetExe)
         put("execArgs", execArgs)
@@ -1658,6 +1683,14 @@ private fun installBundledComponents(context: Context, onStatus: (String) -> Uni
     if (!File(dxvkX64Dir, "profile.json").exists()) {
         onStatus("Extracting DXVK x64...")
         if (!extractBundledWcp(context, "dxvk-$DXVK_X64_VERSION.wcp", dxvkX64Dir)) Timber.e("Failed to extract DXVK x64")
+    }
+
+    val fexcoreDir = File(ContentsManager.getContentTypeDir(context, ContentProfile.ContentType.CONTENT_TYPE_FEXCORE), "2608")
+    if (!File(fexcoreDir, "profile.json").exists()) {
+        onStatus("Extracting FEXCore 2608...")
+        if (!extractBundledWcp(context, "fexcore-2608.wcp", fexcoreDir)) {
+            extractBundledWcp(context, "FEXCore-2608-stable.wcp", fexcoreDir)
+        }
     }
 
     ImageFsInstaller.ensureBionicLib(context, ImageFs.find(context).rootDir)
