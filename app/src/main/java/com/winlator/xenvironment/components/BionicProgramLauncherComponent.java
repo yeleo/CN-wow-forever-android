@@ -133,8 +133,8 @@ public class BionicProgramLauncherComponent extends GuestProgramLauncherComponen
             } else {
                 extractBox64Files();
             }
-            ensureFexCoreDlls();
             if (preUnpack != null) preUnpack.run();
+            ensureFexCoreDlls();
             pid = execGuestProgram();
             Log.d("BionicProgramLauncherComponent", "Process " + pid + " started");
             PluviaApp.setKeepAlive(true);
@@ -476,6 +476,9 @@ public class BionicProgramLauncherComponent extends GuestProgramLauncherComponen
             } catch (Exception ignored) {}
         });
 
+        // Ensure FEXCore translation DLLs are deployed right before process execution
+        ensureFexCoreDlls();
+
         return ProcessHelper.exec(command, envVars.toStringArray(), workingDir != null ? workingDir : rootDir, (status) -> {
             synchronized (lock) {
                 pid = -1;
@@ -521,30 +524,81 @@ public class BionicProgramLauncherComponent extends GuestProgramLauncherComponen
     private void ensureFexCoreDlls() {
         Context context = environment.getContext();
         File rootDir = environment.getImageFs().getRootDir();
-        File system32dir = new File(rootDir, "home/xuser/.wine/drive_c/windows/system32");
-        if (!system32dir.exists()) {
-            system32dir.mkdirs();
-        }
 
-        // Copy FEXCore translation DLLs (libarm64ecfex.dll & libwow64fex.dll) to system32 passively
+        List<File> targetDirs = new ArrayList<>();
+        // 1. Home wine prefix system32
+        targetDirs.add(new File(rootDir, "home/xuser/.wine/drive_c/windows/system32"));
+        // 2. Container specific wine prefix system32
+        if (container != null) {
+            if (container.getRootDir() != null) {
+                targetDirs.add(new File(container.getRootDir(), ".wine/drive_c/windows/system32"));
+            }
+            targetDirs.add(new File(rootDir, "home/" + ImageFs.USER + "-" + container.id + "/.wine/drive_c/windows/system32"));
+        }
+        // 3. Proton wine library paths (imageFs wine path)
+        String winePathStr = environment.getImageFs().getWinePath();
+        if (winePathStr != null && !winePathStr.isEmpty()) {
+            File wineDir = new File(winePathStr);
+            targetDirs.add(new File(wineDir, "lib/wine/aarch64-windows"));
+            targetDirs.add(new File(wineDir, "lib/wine/x86_64-windows"));
+            targetDirs.add(new File(wineDir, "lib64/wine/aarch64-windows"));
+            targetDirs.add(new File(wineDir, "lib64/wine/x86_64-windows"));
+        }
+        // 4. Shared proton directories
         try {
-            String[] fexFiles = {"libarm64ecfex.dll", "libwow64fex.dll"};
-            for (String f : fexFiles) {
-                File target = new File(system32dir, f);
-                try (java.io.InputStream in = context.getAssets().open("fexcore/" + f);
-                     java.io.FileOutputStream out = new java.io.FileOutputStream(target)) {
-                    byte[] buf = new byte[8192];
-                    int len;
-                    while ((len = in.read(buf)) != -1) {
-                        out.write(buf, 0, len);
+            File sharedProton = ImageFs.getSharedProtonDir(context);
+            if (sharedProton != null && sharedProton.isDirectory()) {
+                File[] protonInstalls = sharedProton.listFiles();
+                if (protonInstalls != null) {
+                    for (File p : protonInstalls) {
+                        if (p.isDirectory()) {
+                            targetDirs.add(new File(p, "lib/wine/aarch64-windows"));
+                            targetDirs.add(new File(p, "lib/wine/x86_64-windows"));
+                            targetDirs.add(new File(p, "lib64/wine/aarch64-windows"));
+                            targetDirs.add(new File(p, "lib64/wine/x86_64-windows"));
+                        }
                     }
-                    Log.i("BionicProgramLauncherComponent", "Copied " + f + " to " + target.getAbsolutePath() + " (" + target.length() + " bytes)");
-                } catch (java.io.FileNotFoundException e) {
-                    Log.w("BionicProgramLauncherComponent", "Asset fexcore/" + f + " not found: " + e.getMessage());
                 }
             }
-        } catch (Exception e) {
-            Log.e("BionicProgramLauncherComponent", "Failed to copy FEXCore DLLs to system32", e);
+        } catch (Exception ignored) {}
+
+        String[] fexFiles = {"libarm64ecfex.dll", "libwow64fex.dll"};
+        for (String f : fexFiles) {
+            byte[] fileBytes = null;
+            try (java.io.InputStream in = context.getAssets().open("fexcore/" + f)) {
+                java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
+                byte[] buf = new byte[16384];
+                int len;
+                while ((len = in.read(buf)) != -1) {
+                    baos.write(buf, 0, len);
+                }
+                fileBytes = baos.toByteArray();
+            } catch (Exception e) {
+                Log.w("BionicProgramLauncherComponent", "Asset fexcore/" + f + " not found: " + e.getMessage());
+            }
+
+            if (fileBytes != null && fileBytes.length > 0) {
+                for (File dir : targetDirs) {
+                    try {
+                        if (!dir.exists()) {
+                            if (dir.getPath().contains("system32")) {
+                                dir.mkdirs();
+                            } else {
+                                continue;
+                            }
+                        }
+                        File target = new File(dir, f);
+                        if (!target.exists() || target.length() != fileBytes.length) {
+                            try (java.io.FileOutputStream out = new java.io.FileOutputStream(target)) {
+                                out.write(fileBytes);
+                            }
+                            Log.i("BionicProgramLauncherComponent", "Copied " + f + " to " + target.getAbsolutePath() + " (" + target.length() + " bytes)");
+                        }
+                    } catch (Exception e) {
+                        Log.e("BionicProgramLauncherComponent", "Failed to write " + f + " to " + dir.getAbsolutePath(), e);
+                    }
+                }
+            }
         }
     }
 

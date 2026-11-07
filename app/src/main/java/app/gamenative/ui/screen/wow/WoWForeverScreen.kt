@@ -1416,9 +1416,25 @@ private fun prepareLaunch(context: Context, gameRoot: File, gpu: GpuProfile, scr
     val sys32 = File(imageFs.rootDir, "${ImageFs.WINEPREFIX}/drive_c/windows/system32")
     if (!sys32.exists()) sys32.mkdirs()
 
-    // 1. Ensure FEXCore translation DLLs in system32
+    val foreverDir = File(gameRoot, FLAVOR_DIR)
+    if (!foreverDir.exists()) foreverDir.mkdirs()
+
+    // 1. Ensure FEXCore translation DLLs in gameRoot/_forever_/ (First line of defense) and system32
     try {
-        listOf("libarm64ecfex.dll", "libwow64fex.dll").forEach { dllName ->
+        val fexDlls = listOf("libarm64ecfex.dll", "libwow64fex.dll")
+        fexDlls.forEach { dllName ->
+            // Copy to gameRoot/_forever_/ (Wine G:\_forever_\)
+            val foreverTarget = File(foreverDir, dllName)
+            try {
+                context.assets.open("fexcore/$dllName").use { input ->
+                    foreverTarget.outputStream().use { output -> input.copyTo(output) }
+                }
+                LauncherDebugLogger.log("P2_PREPARE", "Injected FEXCore backup asset $dllName to ${foreverTarget.path} (${foreverTarget.length()} bytes)")
+            } catch (e: Exception) {
+                LauncherDebugLogger.log("P2_PREPARE", "FEXCore asset fexcore/$dllName not found for foreverDir: ${e.message}")
+            }
+
+            // Copy to sys32
             val target = File(sys32, dllName)
             try {
                 context.assets.open("fexcore/$dllName").use { input ->

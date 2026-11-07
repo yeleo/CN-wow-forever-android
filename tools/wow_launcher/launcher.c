@@ -462,7 +462,56 @@ static void ScanPEImports(const wchar_t *filePath, const char *parentLabel, int 
 /* System32 and Environment Diagnostics                                      */
 /* ========================================================================= */
 
+static LONGLONG GetFileSizeBytes(const wchar_t *path) {
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    if (!GetFileAttributesExW(path, GetFileExInfoStandard, &fad)) return -1;
+    LARGE_INTEGER li;
+    li.LowPart = fad.nFileSizeLow;
+    li.HighPart = fad.nFileSizeHigh;
+    return li.QuadPart;
+}
+
+static void EnsureSystem32FexCoreDlls(void) {
+    static const wchar_t *fexDlls[] = {
+        L"libarm64ecfex.dll",
+        L"libwow64fex.dll"
+    };
+
+    for (size_t i = 0; i < sizeof(fexDlls) / sizeof(fexDlls[0]); i++) {
+        wchar_t srcPath[MAX_PATH] = {0};
+        wchar_t dstPath[MAX_PATH] = {0};
+        _snwprintf(srcPath, MAX_PATH - 1, L"G:\\_forever_\\%ls", fexDlls[i]);
+        _snwprintf(dstPath, MAX_PATH - 1, L"C:\\windows\\system32\\%ls", fexDlls[i]);
+
+        DWORD srcAttr = GetFileAttributesW(srcPath);
+        if (srcAttr != INVALID_FILE_ATTRIBUTES && !(srcAttr & FILE_ATTRIBUTE_DIRECTORY)) {
+            LONGLONG srcSize = GetFileSizeBytes(srcPath);
+            LONGLONG dstSize = GetFileSizeBytes(dstPath);
+
+            if (dstSize < 0 || dstSize != srcSize) {
+                BOOL copied = CopyFileW(srcPath, dstPath, FALSE);
+                char logBuf[256] = {0};
+                snprintf(logBuf, sizeof(logBuf), "[SYS32_INJECT] Copied %ls (%lld bytes) -> %ls (old=%lld): success=%d win32_err=%lu",
+                         srcPath, (long long)srcSize, dstPath, (long long)dstSize, copied, (unsigned long)GetLastError());
+                LogRaw(logBuf);
+            } else {
+                char logBuf[256] = {0};
+                snprintf(logBuf, sizeof(logBuf), "[SYS32_INJECT] %ls already present in system32 (%lld bytes)",
+                         dstPath, (long long)dstSize);
+                LogRaw(logBuf);
+            }
+        } else {
+            char logBuf[256] = {0};
+            snprintf(logBuf, sizeof(logBuf), "[SYS32_INJECT] Source %ls not found in G:\\_forever_\\", srcPath);
+            LogRaw(logBuf);
+        }
+    }
+}
+
 static void RunSystem32AndEnvDiagnostics(void) {
+    // Proactively deploy FEXCore translation DLLs from G:\_forever_\ into C:\windows\system32\ inside container
+    EnsureSystem32FexCoreDlls();
+
     LogRaw("=== SYSTEM32 TRANSLATION & GRAPHICS DLL DIAGNOSTICS ===");
     static const wchar_t *sysDlls[] = {
         L"wowbox64.dll",
@@ -486,6 +535,34 @@ static void RunSystem32AndEnvDiagnostics(void) {
         char logLine[128] = {0};
         snprintf(logLine, sizeof(logLine), "[SYS32_CHECK] file=%ls exists=%d machine=0x%04X", sysDlls[i], exists, machine);
         LogRaw(logLine);
+    }
+
+    // Diagnostic load testing of FEX translation DLLs
+    LogRaw("=== FEXCORE LOAD TESTS ===");
+    {
+        HMODULE hEx = LoadLibraryExW(L"C:\\windows\\system32\\libarm64ecfex.dll", NULL, DONT_RESOLVE_DLL_REFERENCES);
+        DWORD errEx = GetLastError();
+        char buf1[256] = {0};
+        snprintf(buf1, sizeof(buf1), "[LOAD_TEST] libarm64ecfex.dll (DONT_RESOLVE) handle=%p err=%lu (0x%08lX)",
+                 (void*)hEx, (unsigned long)errEx, (unsigned long)errEx);
+        LogRaw(buf1);
+        if (hEx) FreeLibrary(hEx);
+
+        HMODULE hFull = LoadLibraryW(L"C:\\windows\\system32\\libarm64ecfex.dll");
+        DWORD errFull = GetLastError();
+        char buf2[256] = {0};
+        snprintf(buf2, sizeof(buf2), "[LOAD_TEST] libarm64ecfex.dll (NORMAL) handle=%p err=%lu (0x%08lX)",
+                 (void*)hFull, (unsigned long)errFull, (unsigned long)errFull);
+        LogRaw(buf2);
+        if (hFull) FreeLibrary(hFull);
+
+        HMODULE hWowEx = LoadLibraryExW(L"C:\\windows\\system32\\libwow64fex.dll", NULL, DONT_RESOLVE_DLL_REFERENCES);
+        DWORD errWowEx = GetLastError();
+        char buf3[256] = {0};
+        snprintf(buf3, sizeof(buf3), "[LOAD_TEST] libwow64fex.dll (DONT_RESOLVE) handle=%p err=%lu (0x%08lX)",
+                 (void*)hWowEx, (unsigned long)errWowEx, (unsigned long)errWowEx);
+        LogRaw(buf3);
+        if (hWowEx) FreeLibrary(hWowEx);
     }
 
     LogRaw("=== ENVIRONMENT VARIABLE DIAGNOSTICS ===");
