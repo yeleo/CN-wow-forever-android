@@ -3604,7 +3604,7 @@ private fun setupXEnvironment(
     val enableWineDebug = PrefManager.enableWineDebug
     val enableBox86Logs = WinlatorPrefManager.getBoolean("enable_box86_64_logs", false)
     val wineDebugChannels = PrefManager.wineDebugChannels
-    val isWowContainer = container.name.contains("WoW", ignoreCase = true) || container.id == 1
+    val isWowContainer = container.name.contains("WoW", ignoreCase = true) || container.id == "1"
     val wineDebugVal = when {
         enableWineDebug && wineDebugChannels.isNotEmpty() -> "+" + wineDebugChannels.replace(",", ",+")
         isWowContainer -> "err+all,warn+module,+loaddll"
