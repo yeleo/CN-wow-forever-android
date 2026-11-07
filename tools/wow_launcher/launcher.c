@@ -594,34 +594,6 @@ static void RunSystem32AndEnvDiagnostics(void) {
         LogRaw(logLine);
     }
 
-    // Diagnostic load testing of FEX translation DLLs
-    LogRaw("=== FEXCORE LOAD TESTS ===");
-    {
-        HMODULE hEx = LoadLibraryExW(L"C:\\windows\\system32\\libarm64ecfex.dll", NULL, DONT_RESOLVE_DLL_REFERENCES);
-        DWORD errEx = GetLastError();
-        char buf1[256] = {0};
-        snprintf(buf1, sizeof(buf1), "[LOAD_TEST] libarm64ecfex.dll (DONT_RESOLVE) handle=%p err=%lu (0x%08lX)",
-                 (void*)hEx, (unsigned long)errEx, (unsigned long)errEx);
-        LogRaw(buf1);
-        if (hEx) FreeLibrary(hEx);
-
-        HMODULE hFull = LoadLibraryW(L"C:\\windows\\system32\\libarm64ecfex.dll");
-        DWORD errFull = GetLastError();
-        char buf2[256] = {0};
-        snprintf(buf2, sizeof(buf2), "[LOAD_TEST] libarm64ecfex.dll (NORMAL) handle=%p err=%lu (0x%08lX)",
-                 (void*)hFull, (unsigned long)errFull, (unsigned long)errFull);
-        LogRaw(buf2);
-        if (hFull) FreeLibrary(hFull);
-
-        HMODULE hWowEx = LoadLibraryExW(L"C:\\windows\\system32\\libwow64fex.dll", NULL, DONT_RESOLVE_DLL_REFERENCES);
-        DWORD errWowEx = GetLastError();
-        char buf3[256] = {0};
-        snprintf(buf3, sizeof(buf3), "[LOAD_TEST] libwow64fex.dll (DONT_RESOLVE) handle=%p err=%lu (0x%08lX)",
-                 (void*)hWowEx, (unsigned long)errWowEx, (unsigned long)errWowEx);
-        LogRaw(buf3);
-        if (hWowEx) FreeLibrary(hWowEx);
-    }
-
     LogRaw("=== ENVIRONMENT VARIABLE DIAGNOSTICS ===");
     LPWCH envBlock = GetEnvironmentStringsW();
     if (envBlock) {
@@ -663,7 +635,7 @@ static void RunX64ProbeIfPresent(void) {
     _snwprintf(probeCmd, sizeof(probeCmd) / sizeof(wchar_t) - 1, L"\"%ls\"", PROBE_EXE_PATH);
 
     if (CreateProcessW(PROBE_EXE_PATH, probeCmd, NULL, NULL, FALSE, 0, NULL, GAME_WORKING_DIR, &si, &pi)) {
-        DWORD waitResult = WaitForSingleObject(pi.hProcess, 10000);
+        DWORD waitResult = WaitForSingleObject(pi.hProcess, 15000);
         DWORD exitCode = 0;
         GetExitCodeProcess(pi.hProcess, &exitCode);
         CloseHandle(pi.hProcess);
@@ -680,13 +652,51 @@ static void RunX64ProbeIfPresent(void) {
     }
 }
 
+static void LogDirStats(void) {
+    WIN32_FIND_DATAW fd;
+    HANDLE hFind = FindFirstFileW(L"G:\\_forever_\\Logs\\*", &fd);
+    if (hFind == INVALID_HANDLE_VALUE) return;
+
+    FILE *fp = _wfopen(LOG_FILE_PATH, L"a");
+    if (!fp) {
+        FindClose(hFind);
+        return;
+    }
+
+    time_t now = time(NULL);
+    struct tm *t = localtime(&now);
+    char timeBuf[64] = {0};
+    if (t) strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", t);
+
+    do {
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+
+        ULONGLONG fileSize = ((ULONGLONG)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
+        SYSTEMTIME stUtc, stLocal;
+        FileTimeToSystemTime(&fd.ftLastWriteTime, &stUtc);
+        SystemTimeToTzSpecificLocalTime(NULL, &stUtc, &stLocal);
+
+        fprintf(fp, "[%s] [LOG_DIR_STAT] file=%ls size=%llu mtime=%04u-%02u-%02u %02u:%02u:%02u\n",
+                timeBuf, fd.cFileName, (unsigned long long)fileSize,
+                stLocal.wYear, stLocal.wMonth, stLocal.wDay,
+                stLocal.wHour, stLocal.wMinute, stLocal.wSecond);
+    } while (FindNextFileW(hFind, &fd));
+
+    fflush(fp);
+    fclose(fp);
+    FindClose(hFind);
+}
+
 /* ========================================================================= */
 /* Main Entry Point                                                         */
 /* ========================================================================= */
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine, int nCmdShow) {
-    // Step 0: Ensure child processes disable verbose WINEDEBUG logging
-    SetEnvironmentVariableW(L"WINEDEBUG", L"-all");
+    // Step 0: Preserve container WINEDEBUG or default to diagnostic err+all,+loaddll,+module
+    wchar_t curWineDebug[256] = {0};
+    if (!GetEnvironmentVariableW(L"WINEDEBUG", curWineDebug, sizeof(curWineDebug) / sizeof(wchar_t)) || curWineDebug[0] == L'\0') {
+        SetEnvironmentVariableW(L"WINEDEBUG", L"err+all,+loaddll,+module");
+    }
 
     LogStep("WRAPPER_START", 0);
 
@@ -882,10 +892,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
 
         LogRaw("=== PE HEADER (Wow.exe) ===");
         LogPEHeaderDetails(GAME_X64_EXE_PATH, "Wow.exe");
-    }
 
-    // Step 7: Disable Wine debug logging completely to avoid disk I/O bottlenecks during unpacker loops
-    SetEnvironmentVariableW(L"WINEDEBUG", L"-all");
+        // Run x64 diagnostic probe
+        RunX64ProbeIfPresent();
+    }
 
     STARTUPINFOW si;
     ZeroMemory(&si, sizeof(si));
@@ -922,12 +932,37 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
 
     LogStep("GAME_PROCESS_STARTED", 0);
 
-    // Step 8: Wait for target process to exit and forward exit code
-    WaitForSingleObject(pi.hProcess, INFINITE);
+    // Step 8: Heartbeat loop and wait for target process (up to 10 minutes = 600 seconds)
+    DWORD startTime = GetTickCount();
+    DWORD exitCode = STILL_ACTIVE;
 
-    DWORD exitCode = 0;
-    if (!GetExitCodeProcess(pi.hProcess, &exitCode)) {
-        exitCode = GetLastError();
+    while (TRUE) {
+        DWORD waitResult = WaitForSingleObject(pi.hProcess, 5000);
+        DWORD elapsedSec = (GetTickCount() - startTime) / 1000;
+
+        if (waitResult == WAIT_OBJECT_0) {
+            GetExitCodeProcess(pi.hProcess, &exitCode);
+            break;
+        }
+
+        // Process is still running (waitResult == WAIT_TIMEOUT or other)
+        GetExitCodeProcess(pi.hProcess, &exitCode);
+        char heartbeatBuf[256] = {0};
+        snprintf(heartbeatBuf, sizeof(heartbeatBuf),
+                 "[HEARTBEAT] elapsed=%lus still_active=%d exit_code=%lu (0x%08lX)",
+                 (unsigned long)elapsedSec, (exitCode == STILL_ACTIVE),
+                 (unsigned long)exitCode, (unsigned long)exitCode);
+        LogRaw(heartbeatBuf);
+
+        // Record metadata of files in G:\_forever_\Logs\ (metadata only - strictly NO reading file contents)
+        LogDirStats();
+
+        if (elapsedSec >= 600) {
+            LogRaw("[HEARTBEAT_TIMEOUT] 600s reached, waiting indefinitely for process exit...");
+            WaitForSingleObject(pi.hProcess, INFINITE);
+            GetExitCodeProcess(pi.hProcess, &exitCode);
+            break;
+        }
     }
 
     CloseHandle(pi.hProcess);

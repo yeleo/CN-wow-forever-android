@@ -393,7 +393,18 @@ public class BionicProgramLauncherComponent extends GuestProgramLauncherComponen
 
         if (wineInfo != null && wineInfo.isArm64EC()) {
             if (!envVars.has("WINEDEBUG")) {
-                envVars.put("WINEDEBUG", "-all");
+                envVars.put("WINEDEBUG", "err+all,+loaddll,+module");
+            }
+        }
+
+        // Strictly enforce security: prohibit sensitive debug channels that could leak credentials/tokens
+        String wineDebug = envVars.get("WINEDEBUG");
+        if (wineDebug != null && !wineDebug.isEmpty()) {
+            if (wineDebug.contains("reg") || wineDebug.contains("crypt") ||
+                wineDebug.contains("relay") || wineDebug.contains("secur")) {
+                wineDebug = wineDebug.replaceAll("(?i)(\\+|-)?(reg|crypt|relay|secur)[a-zA-Z0-9_]*", "");
+                if (wineDebug.trim().isEmpty()) wineDebug = "-all";
+                envVars.put("WINEDEBUG", wineDebug);
             }
         }
 
@@ -467,20 +478,23 @@ public class BionicProgramLauncherComponent extends GuestProgramLauncherComponen
             Log.e("BionicProgramLauncherComponent", "Failed to init linux_wine_boot.log: " + e.getMessage());
         }
 
-        java.util.concurrent.atomic.AtomicInteger sehCount = new java.util.concurrent.atomic.AtomicInteger(0);
+        final long MAX_LOG_BYTES = 50L * 1024 * 1024; // 50MB ceiling
+        final java.util.concurrent.atomic.AtomicLong currentLogBytes = new java.util.concurrent.atomic.AtomicLong(linuxWineBootLog.length());
+        final java.util.concurrent.atomic.AtomicBoolean truncated = new java.util.concurrent.atomic.AtomicBoolean(false);
+
         ProcessHelper.addDebugCallback(line -> {
             try {
-                if (line.contains(":seh:")) {
-                    int count = sehCount.incrementAndGet();
-                    if (count > 5000) {
-                        if (count == 5001) {
-                            java.io.FileWriter fw = new java.io.FileWriter(linuxWineBootLog, true);
-                            fw.write("[SEH_THROTTLE] Maximum 5000 lines of :seh: debug logs reached; further SEH entries suppressed.\n");
-                            fw.flush();
-                            fw.close();
-                        }
-                        return;
+                if (truncated.get()) return;
+                byte[] lineBytes = (line + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                long newTotal = currentLogBytes.addAndGet(lineBytes.length);
+                if (newTotal > MAX_LOG_BYTES) {
+                    if (truncated.compareAndSet(false, true)) {
+                        java.io.FileWriter fw = new java.io.FileWriter(linuxWineBootLog, true);
+                        fw.write("\n[LOG_TRUNCATED] Reached 50MB size ceiling; further Wine debug output stopped to protect storage.\n");
+                        fw.flush();
+                        fw.close();
                     }
+                    return;
                 }
                 java.io.FileWriter fw = new java.io.FileWriter(linuxWineBootLog, true);
                 fw.write(line + "\n");

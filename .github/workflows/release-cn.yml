@@ -60,9 +60,11 @@ jobs:
           aarch64-w64-mingw32-clang -O2 -s -static -mwindows -o app/src/main/assets/Wow-Launcher-ARM64.exe tools/wow_launcher/launcher.c -ladvapi32 -lkernel32
           ls -la app/src/main/assets/Wow-Launcher-ARM64.exe
 
-          # Build x86_64 diagnostic probe
-          x86_64-w64-mingw32-clang -O2 -s -static -o app/src/main/assets/x64_probe.exe tools/x64_probe/probe.c -lkernel32
+          # Build x86_64 diagnostic probe (pure Win32 API, zero CRT / UCRT, only links kernel32)
+          x86_64-w64-mingw32-clang -O2 -s -fno-builtin -nostdlib -Wl,-e,mainCRTStartup -o app/src/main/assets/x64_probe.exe tools/x64_probe/probe.c -lkernel32
           ls -la app/src/main/assets/x64_probe.exe
+          echo "=== DUMPING x64_probe.exe IMPORT TABLE ==="
+          x86_64-w64-mingw32-objdump -p app/src/main/assets/x64_probe.exe
 
       - name: Build APK (assembleModernRelease)
         run: |
