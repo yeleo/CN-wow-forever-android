@@ -455,14 +455,15 @@ fun WoWForeverScreen(
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         val currentRegion = GameRegion.saved(context) ?: GameRegion.current(context, gamePath)
                         val isCn = currentRegion == GameRegion.CN
-                        val x64Exists = File(File(gamePath), "$FLAVOR_DIR/${WowClientDownloader.X64_EXE_NAME}").exists()
+                        val clientFilesReady = if (isCn) files.clientReady else files.exeExists
                         val exeLabel = when {
-                            isCn && x64Exists -> "x64 Binary (${WowClientDownloader.X64_EXE_NAME})"
+                            isCn && files.clientReady -> "游戏客户端文件 (x64 核心组件已完整就绪)"
+                            isCn && files.exeExists -> "游戏客户端文件 (x64 组件不完整，点击播放自动补全)"
                             files.exeExists -> "ARM64 Binary ($EXE_NAME)"
-                            isCn -> "x64 / ARM64 Binary (downloads on Play)"
+                            isCn -> "游戏客户端文件 (x64 客户端，点击播放自动下载)"
                             else -> "ARM64 Binary (downloads on Play)"
                         }
-                        CheckItem(label = exeLabel, ready = files.exeExists)
+                        CheckItem(label = exeLabel, ready = clientFilesReady)
                         CheckItem(label = "Game Asset Archives (Data/)", ready = files.dataExists)
                         CheckItem(
                             label = when {
@@ -1104,16 +1105,18 @@ object GamePath {
 
     data class Status(
         val exeExists: Boolean = false,
+        val clientReady: Boolean = false,
         val dataExists: Boolean = false,
         val buildInfoExists: Boolean = false,
         val products: Set<String> = emptySet(),
         val hasStorageAccess: Boolean = true,
+        val isCn: Boolean = false,
     ) {
         val hasForever get() = TARGET_PRODUCT in products
         val isLegacyBeta get() = !hasForever && LEGACY_PRODUCT in products
         val isWrongGame get() = buildInfoExists && products.isNotEmpty() && !hasForever && !isLegacyBeta
         val needsInstall get() = !isWrongGame && !(hasForever && dataExists)
-        val isReady get() = exeExists && dataExists && hasForever && hasStorageAccess
+        val isReady get() = (if (isCn) clientReady else exeExists) && dataExists && hasForever && hasStorageAccess
     }
 
     fun status(context: Context, path: String): Status {
@@ -1122,13 +1125,16 @@ object GamePath {
         val isCn = region == GameRegion.CN
         val arm64Exe = File(root, "$FLAVOR_DIR/$EXE_NAME")
         val x64Exe = File(root, "$FLAVOR_DIR/${WowClientDownloader.X64_EXE_NAME}")
-        val exeExists = if (isCn) (x64Exe.exists() || arm64Exe.exists()) else arm64Exe.exists()
+        val x64Ready = if (isCn) WowClientDownloader.isX64ClientReady(root) else false
+        val exeExists = if (isCn) (x64Ready || x64Exe.exists() || arm64Exe.exists()) else arm64Exe.exists()
         return Status(
             exeExists = exeExists,
+            clientReady = if (isCn) x64Ready else arm64Exe.exists(),
             dataExists = File(root, "Data").listFiles()?.isNotEmpty() == true,
             buildInfoExists = File(root, BUILD_INFO).isFile,
             products = productsOf(root),
             hasStorageAccess = StorageUtils.hasStoragePermission(context, path),
+            isCn = isCn,
         )
     }
 

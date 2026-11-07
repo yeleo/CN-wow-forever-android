@@ -24,6 +24,32 @@ object WowClientDownloader {
     const val TARGET_PRODUCT = "wowf"
     const val BUILD_INFO = ".build.info"
 
+    // Optional debug switch: allow downloading ARM64 client binaries for A/B testing (defaults to false)
+    var ALLOW_DOWNLOAD_ARM64 = false
+
+    // Verified required x64 client files and their exact byte sizes (v1.60.1.70840)
+    val EXPECTED_X64_FILES = mapOf(
+        "Wow.exe" to 109_815_504L,
+        "wow_loader.dll" to 41_043_152L,
+        "GFSDK_Aftermath_Lib.x64.dll" to 5_570_136L,
+        "icudt78l.dat" to 15_450_560L,
+        "libxell.dll" to 359_792L,
+        "BlizzardError.exe" to 796_296L,
+    )
+
+    private val KNOWN_REGION_TAGS = setOf("CN", "US", "EU", "KR", "TW")
+
+    fun isX64ClientReady(gameRoot: File): Boolean {
+        val clientDir = File(gameRoot, FLAVOR_DIR)
+        for ((name, expectedSize) in EXPECTED_X64_FILES) {
+            val f = File(clientDir, name)
+            if (!f.isFile || f.length() != expectedSize) {
+                return false
+            }
+        }
+        return true
+    }
+
     // The pre-release beta. Its Data/ archives are shared with the full release, so beta installs upgrade in place.
     const val LEGACY_FLAVOR_DIR = "_classic_beta_"
     const val LEGACY_PRODUCT = "wow_classic_beta"
@@ -218,6 +244,7 @@ object WowClientDownloader {
             buildConfig = parseConfig(String(buildConfigRaw)),
             archives = lazy { cdnConfig?.let { ArchiveLocator(cdn, gameRoot, it.getValue("archives")) } },
             regionCode = regionCode,
+            expectedVersion = target.remoteVersion,
             onStatus = onStatus,
         )
 
@@ -230,22 +257,39 @@ object WowClientDownloader {
     }
 
     fun download(gameRoot: File, regionCode: String?, onStatus: (String) -> Unit) {
-        val row = activeBuild(File(gameRoot, BUILD_INFO))
+        val buildInfoFile = File(gameRoot, BUILD_INFO)
+        if (!buildInfoFile.exists()) {
+            install(gameRoot, regionCode, onStatus)
+            return
+        }
+        val row = activeBuild(buildInfoFile)
         check(row["Product"] == TARGET_PRODUCT) { "Incompatible game product: ${row["Product"]}. Expected $TARGET_PRODUCT." }
         val effectiveRegion = regionCode ?: row["Branch"]
-        val latest = checkVersion(gameRoot, effectiveRegion)
-        if (latest != null && latest.remoteBuildConfig.isNotBlank()) return updateGame(gameRoot, latest, effectiveRegion, onStatus)
+        val localVersion = row["Version"]?.trim()
 
         val cdn = Cdn(hosts = splitHosts(row.getValue("CDN Hosts")), path = row.getValue("CDN Path"))
+        val buildKey = row.getValue("Build Key")
+        val buildConfigRaw = cdn.require("config", buildKey)
+        val buildConfig = parseConfig(String(buildConfigRaw))
+
+        // Check version consistency: manifest build-name must match local .build.info version
+        val buildName = buildConfig["build-name"]?.firstOrNull() ?: ""
+        if (localVersion != null && !buildName.contains(localVersion) && !buildName.contains(localVersion.substringAfterLast('.'))) {
+            val msg = "Version mismatch: .build.info specifies version $localVersion, but manifest is $buildName. Stopped download to protect integrity."
+            LauncherDebugLogger.log("VERSION_CHECK", msg)
+            throw IllegalStateException(msg)
+        }
+
         onStatus("Reading build ${row["Version"].orEmpty()} manifest...")
         syncClient(
             gameRoot = gameRoot,
             cdn = cdn,
-            buildConfig = parseConfig(String(cdn.require("config", row.getValue("Build Key")))),
+            buildConfig = buildConfig,
             archives = lazy {
                 ArchiveLocator(cdn, gameRoot, parseConfig(String(cdn.require("config", row.getValue("CDN Key")))).getValue("archives"))
             },
             regionCode = effectiveRegion,
+            expectedVersion = localVersion,
             onStatus = onStatus,
         )
     }
@@ -256,31 +300,127 @@ object WowClientDownloader {
         buildConfig: Map<String, List<String>>,
         archives: Lazy<ArchiveLocator?>,
         regionCode: String? = null,
+        expectedVersion: String? = null,
         onStatus: (String) -> Unit,
     ) {
-        val files = parseInstall(blteDecode(cdn.require("data", buildConfig.getValue("install")[1])))
-            .filter { it.isClientBinary(regionCode) }
-        check(files.isNotEmpty()) { "No Windows client files in this build" }
+        val rawInstall = blteDecode(cdn.require("data", buildConfig.getValue("install")[1]))
+        val allEntries = parseInstall(rawInstall)
+
+        val filterResults = allEntries.map { filterEntry(it, regionCode, ALLOW_DOWNLOAD_ARM64) }
+        val accepted = filterResults.filter { it.accepted }.map { it.entry }
+        val rejected = filterResults.filter { !it.accepted }
+
+        // Step 1: Pre-download audit logging
+        LauncherDebugLogger.log("MANIFEST_AUDIT", "=== SELECTED CLIENT FILES (${accepted.size}) ===")
+        accepted.forEach { entry ->
+            LauncherDebugLogger.log("MANIFEST_AUDIT", "  SELECTED: ${entry.name} (size=${entry.size}, md5=${entry.ckey}, tags=${entry.tags.joinToString()})")
+        }
+        LauncherDebugLogger.log("MANIFEST_AUDIT", "=== EXCLUDED CLIENT FILES (${rejected.size}) ===")
+        rejected.forEach { item ->
+            LauncherDebugLogger.log("MANIFEST_AUDIT", "  EXCLUDED: ${item.entry.name} (size=${item.entry.size}, reason=${item.reason})")
+        }
+
+        // Step 2: Hard assertion for verified x64 client files
+        if (!ALLOW_DOWNLOAD_ARM64) {
+            for ((expectedName, expectedSize) in EXPECTED_X64_FILES) {
+                val match = accepted.firstOrNull { it.name.equals(expectedName, ignoreCase = true) }
+                    ?: throw IllegalStateException("Manifest assertion failed: required file '$expectedName' was not selected!")
+                if (match.size != expectedSize) {
+                    throw IllegalStateException("Manifest assertion failed: file '$expectedName' expected size $expectedSize but manifest has ${match.size}!")
+                }
+            }
+            LauncherDebugLogger.log("MANIFEST_AUDIT", "Hard assertion passed: all 6 verified x64 files are present with identical sizes.")
+        }
+
+        check(accepted.isNotEmpty()) { "No client files selected for this build" }
 
         val clientDir = File(gameRoot, FLAVOR_DIR)
-        val pending = files.filter { entry ->
+        clientDir.mkdirs()
+
+        // Step 3: Check existing local files to protect user data
+        val pending = mutableListOf<InstallEntry>()
+        for (entry in accepted) {
             val localFile = File(clientDir, entry.relativePath)
-            if (entry.name.equals(X64_EXE_NAME, ignoreCase = true) && localFile.exists() && localFile.length() > 10 * 1024 * 1024) {
-                false
+            if (localFile.exists()) {
+                val localSize = localFile.length()
+                val localMd5 = md5Hex(localFile)
+                if (localSize == entry.size && localMd5.equals(entry.ckey, ignoreCase = true)) {
+                    LauncherDebugLogger.log("DOWNLOAD_CHECK", "[PRESERVED] ${entry.relativePath} matches manifest (size=$localSize, md5=$localMd5)")
+                } else {
+                    LauncherDebugLogger.log(
+                        "DOWNLOAD_CHECK",
+                        "[REPLACE_MISMATCH] ${entry.relativePath} differs from manifest: local(size=$localSize, md5=$localMd5) vs expected(size=${entry.size}, md5=${entry.ckey}). Will re-download.",
+                    )
+                    pending.add(entry)
+                }
             } else {
-                md5Hex(localFile) != entry.ckey
+                pending.add(entry)
             }
         }
-        if (pending.isEmpty()) return
 
-        onStatus("Looking up client files...")
-        val ekeys = EncodingLookup(cdn, buildConfig.getValue("encoding")[1]).find(pending.map { it.ckey }.toSet())
-        pending.forEachIndexed { index, entry ->
-            onStatus("Downloading ${entry.name} (${index + 1}/${pending.size})...")
-            val ekey = ekeys[entry.ckey] ?: throw IOException("${entry.name} is missing from the encoding table")
-            val encoded = cdn.fetch("data", ekey) ?: archives.value?.read(ekey) ?: throw IOException("${entry.name} not found on the CDN")
-            writeVerified(File(clientDir, entry.relativePath), entry, encoded)
+        // Step 4: Download with retry & atomic rename
+        if (pending.isNotEmpty()) {
+            onStatus("Looking up client files...")
+            val ekeys = EncodingLookup(cdn, buildConfig.getValue("encoding")[1]).find(pending.map { it.ckey }.toSet())
+            pending.forEachIndexed { index, entry ->
+                onStatus("Downloading ${entry.name} (${index + 1}/${pending.size})...")
+                val ekey = ekeys[entry.ckey] ?: throw IOException("${entry.name} is missing from the encoding table")
+                downloadWithRetry(File(clientDir, entry.relativePath), entry, ekey, cdn, archives)
+            }
         }
+
+        // Step 5: Full verification matrix logging
+        LauncherDebugLogger.log("VERIFY_MATRIX", "=== GAME CLIENT VERIFICATION MATRIX ===")
+        var allOk = true
+        for (entry in accepted) {
+            val localFile = File(clientDir, entry.relativePath)
+            val status: String
+            val localSize: Long
+            val localMd5: String?
+            if (!localFile.exists()) {
+                status = "MISSING"
+                localSize = 0L
+                localMd5 = "NONE"
+                allOk = false
+            } else {
+                localSize = localFile.length()
+                localMd5 = md5Hex(localFile)
+                if (localSize == entry.size && localMd5.equals(entry.ckey, ignoreCase = true)) {
+                    status = "OK"
+                } else {
+                    status = "MISMATCH"
+                    allOk = false
+                }
+            }
+            LauncherDebugLogger.log(
+                "VERIFY_MATRIX",
+                "${entry.relativePath} | EXPECTED_SIZE=${entry.size} | LOCAL_SIZE=$localSize | EXPECTED_MD5=${entry.ckey} | LOCAL_MD5=$localMd5 | STATUS=$status",
+            )
+        }
+        if (!allOk) {
+            throw IllegalStateException("Game client verification matrix check failed: one or more files are missing or mismatched!")
+        }
+    }
+
+    private fun downloadWithRetry(dest: File, entry: InstallEntry, ekey: String, cdn: Cdn, archives: Lazy<ArchiveLocator?>) {
+        var lastError: Exception? = null
+        val maxRetries = 3
+        for (attempt in 1..maxRetries) {
+            try {
+                val encoded = cdn.fetch("data", ekey) ?: archives.value?.read(ekey) ?: throw IOException("${entry.name} not found on the CDN or in archives")
+                writeVerified(dest, entry, encoded)
+                return
+            } catch (e: Exception) {
+                lastError = e
+                Timber.w(e, "Download attempt $attempt/$maxRetries failed for ${entry.name}")
+                if (attempt < maxRetries) {
+                    try {
+                        Thread.sleep(1000L * attempt)
+                    } catch (_: InterruptedException) {}
+                }
+            }
+        }
+        throw IOException("Failed to download ${entry.name} after $maxRetries attempts: ${lastError?.message}", lastError)
     }
 
     private fun writeVerified(dest: File, entry: InstallEntry, encoded: ByteArray) {
@@ -288,12 +428,17 @@ object WowClientDownloader {
         val temp = File(dest.parentFile, "${dest.name}.download")
         val digest = MessageDigest.getInstance("MD5")
         DigestOutputStream(temp.outputStream().buffered(), digest).use { blteDecode(encoded, it) }
-        if (hex(digest.digest(), 0, 16) != entry.ckey) {
+        val actualMd5 = hex(digest.digest(), 0, 16)
+        if (!actualMd5.equals(entry.ckey, ignoreCase = true)) {
             temp.delete()
-            throw IOException("Checksum mismatch for ${entry.name}")
+            throw IOException("Checksum mismatch for ${entry.name}: expected ${entry.ckey}, got $actualMd5")
+        }
+        if (temp.length() != entry.size) {
+            temp.delete()
+            throw IOException("Size mismatch for ${entry.name}: expected ${entry.size}, got ${temp.length()}")
         }
         dest.delete()
-        check(temp.renameTo(dest)) { "Could not write ${dest.path}" }
+        check(temp.renameTo(dest)) { "Could not atomically write ${dest.path}" }
     }
 
     private fun saveConfig(gameRoot: File, key: String, bytes: ByteArray) =
@@ -400,26 +545,55 @@ object WowClientDownloader {
         }
     }
 
-    private data class InstallEntry(val name: String, val ckey: String, val tags: Set<String>) {
+    data class InstallEntry(val name: String, val ckey: String, val size: Long, val tags: Set<String>) {
         val relativePath get() = name.replace('\\', '/')
+    }
 
-        fun isClientBinary(region: String? = null): Boolean {
-            val isCn = region?.equals("CN", ignoreCase = true) == true
-            if ("Windows" !in tags) return false
-            val lower = name.lowercase()
+    data class FilterResult(val entry: InstallEntry, val accepted: Boolean, val reason: String)
 
-            if (isCn) {
-                val isCnX64Exe = name.equals(X64_EXE_NAME, ignoreCase = true) && "x86_64" in tags && "CN" in tags
-                val isArm64Exe = "arm64" in tags && EXCLUDED_ARCH !in tags
-                if (isCnX64Exe || isArm64Exe) {
-                    return !lower.startsWith("utils\\") || "exceptionhandler" in lower
+    fun filterEntry(entry: InstallEntry, regionCode: String?, allowArm64: Boolean): FilterResult {
+        if ("Windows" !in entry.tags) {
+            return FilterResult(entry, false, "Not Windows")
+        }
+
+        val isCn = regionCode?.equals("CN", ignoreCase = true) == true ||
+            (regionCode == null && defaultBranch() == "cn")
+
+        if (allowArm64) {
+            if ("arm64" in entry.tags && "x86_64" !in entry.tags) {
+                val lower = entry.name.lowercase()
+                if (lower.startsWith("utils\\") && "exceptionhandler" !in lower) {
+                    return FilterResult(entry, false, "Utils optional")
                 }
-                return false
-            } else {
-                if (PLATFORM_ARCH !in tags || EXCLUDED_ARCH in tags) return false
-                return !lower.startsWith("utils\\") || "exceptionhandler" in lower
+                return FilterResult(entry, true, "ARM64 binary")
             }
         }
+
+        // x86_64 rules
+        if ("x86_64" !in entry.tags) {
+            return FilterResult(entry, false, "Not x86_64")
+        }
+
+        // Region filtering:
+        // If an entry has region-specific tags among KNOWN_REGION_TAGS (CN, US, EU, KR, TW),
+        // for CN region, it MUST contain "CN" (e.g. CN Wow.exe has CN, while Global Wow.exe has EU,KR,TW,US).
+        if (isCn) {
+            val regionTags = entry.tags.intersect(KNOWN_REGION_TAGS)
+            if (regionTags.isNotEmpty() && "CN" !in regionTags) {
+                return FilterResult(entry, false, "Region mismatch (tags=$regionTags, lacks CN)")
+            }
+        }
+
+        // Utils filtering: only exception handlers are kept
+        val lower = entry.name.lowercase()
+        if (lower.startsWith("utils\\")) {
+            if ("exceptionhandler" !in lower) {
+                return FilterResult(entry, false, "Utils optional")
+            }
+        }
+
+        // D3D12 (x86_64) is kept; D3D12_ARM64 is naturally rejected because it lacks x86_64 tag.
+        return FilterResult(entry, true, "x86_64 client file")
     }
 
     private class Cdn(val hosts: List<String>, val path: String) {
@@ -612,9 +786,11 @@ object WowClientDownloader {
         return (0 until entryCount).map { i ->
             val name = readString()
             val ckey = hex(data, pos, hashSize)
-            pos += hashSize + 4
+            pos += hashSize
+            val size = buffer.getInt(pos).toLong() and 0xFFFFFFFFL
+            pos += 4
             val entryTags = tags.filter { (_, mask) -> mask[i / 8].toInt() and (0x80 ushr (i % 8)) != 0 }.map { it.first }.toSet()
-            InstallEntry(name, ckey, entryTags)
+            InstallEntry(name, ckey, size, entryTags)
         }
     }
 
