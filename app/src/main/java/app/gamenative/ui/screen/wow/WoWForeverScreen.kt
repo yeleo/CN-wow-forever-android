@@ -106,6 +106,7 @@ fun WoWForeverScreen(
     var region by remember(gamePath, files) { mutableStateOf(GameRegion.current(context, gamePath)) }
     var resolution by remember { mutableStateOf(RenderResolution.current(context, gpu.screenSize)) }
     var showWebAuthDialog by remember { mutableStateOf(false) }
+    var pendingAutoLaunchAfterAuth by remember { mutableStateOf(false) }
     var statusText by remember { mutableStateOf(READY_STATUS) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var showStoragePermissionDialog by remember { mutableStateOf(false) }
@@ -207,6 +208,16 @@ fun WoWForeverScreen(
             showStoragePermissionDialog = true
             return
         }
+        val currentRegion = GameRegion.saved(context) ?: GameRegion.current(context, gamePath)
+        val isCn = currentRegion == GameRegion.CN
+        val currentSt = BattleNetSignIn.loadWebToken(context)
+        val hasSt = !currentSt.isNullOrBlank() && BattleNetSignIn.ST_REGEX.matches(currentSt)
+        if (isCn && !hasSt) {
+            LauncherDebugLogger.log("P1_LAUNCH", "launchGame: No valid ST token found, auto-triggering Web Auth dialog")
+            pendingAutoLaunchAfterAuth = true
+            showWebAuthDialog = true
+            return
+        }
         val skipInjector = isDebugSkipInjector(context)
         LauncherDebugLogger.log("P1_LAUNCH", "launchGame entry: region=${region.name}, skipInjector=$skipInjector")
         isLaunching = true
@@ -237,9 +248,10 @@ fun WoWForeverScreen(
                 }
                 LauncherDebugLogger.logException("P7_CRASH", "launchGame", t)
                 Timber.e(t, "Error launching WoW Forever")
-                errorMessage = t.message ?: "Launch failed"
+                errorMessage = "启动失败: ${t.message ?: "未知异常"}。详细日志见 Logs 目录下 launcher_wrapper.log 与 wine_debug.log"
                 statusText = "Launch failed"
                 isLaunching = false
+                PluviaApp.events.emit(AndroidEvent.ClearBootingSplash)
             }
         }
     }
@@ -272,8 +284,9 @@ fun WoWForeverScreen(
         }
         val onLaunchFailed: (AndroidEvent.GameLaunchFailed) -> Unit = { event ->
             resetLaunch()
-            errorMessage = event.message
+            errorMessage = "游戏启动异常退出: ${event.message}。详细诊断见 Logs 目录下 launcher_wrapper.log 与 wine_debug.log"
             statusText = "Launch failed"
+            PluviaApp.events.emit(AndroidEvent.ClearBootingSplash)
         }
         PluviaApp.events.on<AndroidEvent.ForceCloseApp, Unit>(reset)
         PluviaApp.events.on<AndroidEvent.GuestProgramTerminated, Unit>(reset)
@@ -465,10 +478,41 @@ fun WoWForeverScreen(
                             ready = files.hasForever,
                         )
                         CheckItem(label = "All Files Access Permission", ready = files.hasStorageAccess)
-                        CheckItem(
-                            label = if (hasSavedLogin) "Battle.net Login (Configured)" else "Battle.net Login (Configure below play button)",
-                            ready = hasSavedLogin,
-                        )
+                        val currentSt = remember(showWebAuthDialog) { BattleNetSignIn.loadWebToken(context) }
+                        val isStValid = remember(showWebAuthDialog) { BattleNetSignIn.hasValidWebToken(context) }
+                        val isStExpired = remember(showWebAuthDialog) { BattleNetSignIn.isWebTokenExpired(context) }
+                        val remainingMin = remember(showWebAuthDialog) { BattleNetSignIn.getRemainingValidMinutes(context) }
+                        val hasValidFormat = remember(showWebAuthDialog) {
+                            !currentSt.isNullOrBlank() && BattleNetSignIn.ST_REGEX.matches(currentSt)
+                        }
+
+                        if (isCn) {
+                            when {
+                                !hasValidFormat -> {
+                                    CheckItem(
+                                        label = "国服通行证授信 (未授信，点击上方按钮授信)",
+                                        ready = false,
+                                    )
+                                }
+                                isStExpired -> {
+                                    CheckItem(
+                                        label = "国服通行证授信 (可能已过期，建议重新授信)",
+                                        ready = false,
+                                    )
+                                }
+                                else -> {
+                                    CheckItem(
+                                        label = "国服通行证授信 (有效，剩余 ${remainingMin} 分钟)",
+                                        ready = true,
+                                    )
+                                }
+                            }
+                        } else {
+                            CheckItem(
+                                label = "Battle.net Login (External)",
+                                ready = true,
+                            )
+                        }
                         appUpdate?.let {
                             CheckItem(
                                 label = "App Build: v${BuildConfig.VERSION_NAME} (v${it.version} available)",
@@ -691,47 +735,64 @@ fun WoWForeverScreen(
 
                     Spacer(modifier = Modifier.height(12.dp))
 
-
-                    // 2. Fix 14400 / 国服网页登录授信
-                    val savedSt = remember(showWebAuthDialog) { BattleNetSignIn.loadWebToken(context) }
+                    // 国服网页登录授信（主登录入口）
+                    val currentSt = remember(showWebAuthDialog) { BattleNetSignIn.loadWebToken(context) }
                     val stAgeMin = remember(showWebAuthDialog) {
                         val ts = BattleNetSignIn.loadWebTokenTimestamp(context)
                         if (ts > 0L) (System.currentTimeMillis() - ts) / 60000 else -1L
                     }
                     val isStExpired = remember(showWebAuthDialog) { BattleNetSignIn.isWebTokenExpired(context) }
+                    val remainingMin = remember(showWebAuthDialog) { BattleNetSignIn.getRemainingValidMinutes(context) }
+                    val hasValidToken = remember(showWebAuthDialog) {
+                        !currentSt.isNullOrBlank() && BattleNetSignIn.ST_REGEX.matches(currentSt)
+                    }
 
                     OutlinedButton(
                         onClick = { showWebAuthDialog = true },
                         enabled = !isLaunching && !isUpdating,
                         modifier = Modifier
                             .fillMaxWidth(0.85f)
-                            .height(44.dp),
-                        shape = RoundedCornerShape(12.dp),
-                        border = BorderStroke(1.dp, Color(0xFFF59E0B).copy(alpha = 0.8f))
+                            .height(48.dp),
+                        shape = RoundedCornerShape(14.dp),
+                        border = BorderStroke(
+                            1.dp,
+                            if (hasValidToken && !isStExpired) Color(0xFF48BB78).copy(alpha = 0.8f) else Color(0xFFF59E0B).copy(alpha = 0.8f)
+                        ),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = if (hasValidToken && !isStExpired) Color(0xFF0F291E).copy(alpha = 0.4f) else Color(0xFF2D1F0E).copy(alpha = 0.4f)
+                        )
                     ) {
-                        Icon(Icons.Default.Security, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color(0xFFF59E0B))
-                        Spacer(modifier = Modifier.width(6.dp))
+                        Icon(
+                            Icons.Default.Security,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                            tint = if (hasValidToken && !isStExpired) Color(0xFF48BB78) else Color(0xFFF59E0B)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = if (savedSt != null) "Fix 14400 / 重新授信 (已保存)" else "Fix 14400 / 国服网页登录授信",
-                            fontSize = 12.sp,
+                            text = if (hasValidToken) "国服通行证重新授信" else "国服通行证登录授信",
+                            fontSize = 13.sp,
                             fontWeight = FontWeight.Bold,
-                            color = Color(0xFFF59E0B)
+                            color = if (hasValidToken && !isStExpired) Color(0xFF48BB78) else Color(0xFFF59E0B)
                         )
                     }
-                    if (savedSt != null && stAgeMin >= 0) {
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = if (isStExpired) {
-                                "⚠ 授信已达 ${stAgeMin} 分钟（超过 60 分钟，可能已失效，建议重新授信）"
-                            } else {
-                                "✓ 授信有效（${stAgeMin} 分钟前获取，Token: ${savedSt.take(4)}***）"
-                            },
-                            fontSize = 10.sp,
-                            color = if (isStExpired) WowError else Color(0xFF48BB78),
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.fillMaxWidth(0.85f)
-                        )
-                    }
+
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = when {
+                            !hasValidToken -> "授信状态: 未授信（启动前需完成网页授信）"
+                            isStExpired -> "⚠ 授信状态: 已达 ${stAgeMin} 分钟（超过 60 分钟，可能已过期，建议重新授信）"
+                            else -> "✓ 授信状态: 有效（${stAgeMin} 分钟前获取，剩余约 ${remainingMin} 分钟）"
+                        },
+                        fontSize = 11.sp,
+                        color = when {
+                            !hasValidToken -> Color(0xFFED8936)
+                            isStExpired -> WowError
+                            else -> Color(0xFF48BB78)
+                        },
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth(0.85f)
+                    )
 
                     Spacer(modifier = Modifier.height(10.dp))
 
@@ -756,10 +817,18 @@ fun WoWForeverScreen(
         }
     }
 
-
     if (showWebAuthDialog) {
         BattleNetWebAuthDialog(
-            onDismiss = { showWebAuthDialog = false },
+            onDismiss = {
+                showWebAuthDialog = false
+                if (pendingAutoLaunchAfterAuth) {
+                    pendingAutoLaunchAfterAuth = false
+                    val st = BattleNetSignIn.loadWebToken(context)
+                    if (!st.isNullOrBlank() && BattleNetSignIn.ST_REGEX.matches(st)) {
+                        launchGame()
+                    }
+                }
+            },
         )
     }
 
@@ -1397,7 +1466,7 @@ private fun prepareLaunch(context: Context, gameRoot: File, gpu: GpuProfile, scr
             eTmp.writeText("$webToken\n", Charsets.UTF_8)
             LauncherDebugLogger.log(
                 "P2_PREPARE",
-                "Staged bnet_token.tmp to ${eTmp.path} (size: ${eTmp.length()} bytes, token len=${webToken!!.length}, prefix=${webToken.take(4)}***)"
+                "Staged bnet_token.tmp to ${eTmp.path} (size: ${eTmp.length()} bytes, token len=${webToken!!.length}, regexMatch=true)"
             )
         } catch (e: Exception) {
             Timber.e(e, "Failed to stage bnet_token.tmp")
