@@ -127,10 +127,12 @@ public class BionicProgramLauncherComponent extends GuestProgramLauncherComponen
     public void start() {
         synchronized (lock) {
             stop();
-            if (wineInfo.isArm64EC())
+            if (wineInfo.isArm64EC()) {
                 extractEmulatorsDlls();
-            else
                 extractBox64Files();
+            } else {
+                extractBox64Files();
+            }
             if (preUnpack != null) preUnpack.run();
             pid = execGuestProgram();
             Log.d("BionicProgramLauncherComponent", "Process " + pid + " started");
@@ -455,10 +457,16 @@ public class BionicProgramLauncherComponent extends GuestProgramLauncherComponen
         String command;
         if (wineInfo.isArm64EC()) {
             command = winePath + "/" + guestExecutable;
-            if (emulator.toLowerCase().equals("fexcore"))
+            File rootDir = environment.getImageFs().getRootDir();
+            File system32dir = new File(rootDir, "home/xuser/.wine/drive_c/windows/system32");
+            boolean hasFex = new File(system32dir, "libwow64fex.dll").exists();
+            if (emulator.equalsIgnoreCase("fexcore") && hasFex) {
                 envVars.put("HODLL", "libwow64fex.dll");
-            else
+                envVars.put("HODLL64", "libwow64fex.dll");
+            } else {
                 envVars.put("HODLL", "wowbox64.dll");
+                envVars.put("HODLL64", "wowbox64.dll");
+            }
         }
         else
             command = binDir + "/box64 " + guestExecutable;
@@ -532,6 +540,8 @@ public class BionicProgramLauncherComponent extends GuestProgramLauncherComponen
         ImageFs imageFs = ImageFs.find(context);
         envVars.put("BOX64_NOBANNER", ProcessHelper.PRINT_DEBUG && enableLogs ? "0" : "1");
         envVars.put("BOX64_DYNAREC", "1");
+        envVars.put("BOX64_DYNAREC_STRONGMEM", "1");
+        envVars.put("BOX64_DYNAREC_SAFEFLAGS", "1");
 
         if (enableLogs) {
             envVars.put("BOX64_LOG", "1");

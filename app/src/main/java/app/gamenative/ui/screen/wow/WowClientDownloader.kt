@@ -20,6 +20,7 @@ import timber.log.Timber
 object WowClientDownloader {
     const val FLAVOR_DIR = "_forever_"
     const val EXE_NAME = "Wow-ARM64.exe"
+    const val X64_EXE_NAME = "Wow.exe"
     const val TARGET_PRODUCT = "wowf"
     const val BUILD_INFO = ".build.info"
 
@@ -216,6 +217,7 @@ object WowClientDownloader {
             cdn = cdn,
             buildConfig = parseConfig(String(buildConfigRaw)),
             archives = lazy { cdnConfig?.let { ArchiveLocator(cdn, gameRoot, it.getValue("archives")) } },
+            regionCode = regionCode,
             onStatus = onStatus,
         )
 
@@ -243,6 +245,7 @@ object WowClientDownloader {
             archives = lazy {
                 ArchiveLocator(cdn, gameRoot, parseConfig(String(cdn.require("config", row.getValue("CDN Key")))).getValue("archives"))
             },
+            regionCode = effectiveRegion,
             onStatus = onStatus,
         )
     }
@@ -252,13 +255,22 @@ object WowClientDownloader {
         cdn: Cdn,
         buildConfig: Map<String, List<String>>,
         archives: Lazy<ArchiveLocator?>,
+        regionCode: String? = null,
         onStatus: (String) -> Unit,
     ) {
-        val files = parseInstall(blteDecode(cdn.require("data", buildConfig.getValue("install")[1]))).filter { it.isClientBinary() }
-        check(files.isNotEmpty()) { "No Windows ARM64 client files in this build" }
+        val files = parseInstall(blteDecode(cdn.require("data", buildConfig.getValue("install")[1])))
+            .filter { it.isClientBinary(regionCode) }
+        check(files.isNotEmpty()) { "No Windows client files in this build" }
 
         val clientDir = File(gameRoot, FLAVOR_DIR)
-        val pending = files.filter { md5Hex(File(clientDir, it.relativePath)) != it.ckey }
+        val pending = files.filter { entry ->
+            val localFile = File(clientDir, entry.relativePath)
+            if (entry.name.equals(X64_EXE_NAME, ignoreCase = true) && localFile.exists() && localFile.length() > 10 * 1024 * 1024) {
+                false
+            } else {
+                md5Hex(localFile) != entry.ckey
+            }
+        }
         if (pending.isEmpty()) return
 
         onStatus("Looking up client files...")
@@ -391,10 +403,22 @@ object WowClientDownloader {
     private data class InstallEntry(val name: String, val ckey: String, val tags: Set<String>) {
         val relativePath get() = name.replace('\\', '/')
 
-        fun isClientBinary(): Boolean {
-            if ("Windows" !in tags || PLATFORM_ARCH !in tags || EXCLUDED_ARCH in tags) return false
+        fun isClientBinary(region: String? = null): Boolean {
+            val isCn = region?.equals("CN", ignoreCase = true) == true
+            if ("Windows" !in tags) return false
             val lower = name.lowercase()
-            return !lower.startsWith("utils\\") || "exceptionhandler" in lower
+
+            if (isCn) {
+                val isCnX64Exe = name.equals(X64_EXE_NAME, ignoreCase = true) && "x86_64" in tags && "CN" in tags
+                val isArm64Exe = "arm64" in tags && EXCLUDED_ARCH !in tags
+                if (isCnX64Exe || isArm64Exe) {
+                    return !lower.startsWith("utils\\") || "exceptionhandler" in lower
+                }
+                return false
+            } else {
+                if (PLATFORM_ARCH !in tags || EXCLUDED_ARCH in tags) return false
+                return !lower.startsWith("utils\\") || "exceptionhandler" in lower
+            }
         }
     }
 

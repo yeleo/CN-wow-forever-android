@@ -453,7 +453,16 @@ fun WoWForeverScreen(
                     Spacer(modifier = Modifier.height(14.dp))
 
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        CheckItem(label = if (files.exeExists) "ARM64 Binary ($EXE_NAME)" else "ARM64 Binary (downloads on Play)", ready = files.exeExists)
+                        val currentRegion = GameRegion.saved(context) ?: GameRegion.current(context, gamePath)
+                        val isCn = currentRegion == GameRegion.CN
+                        val x64Exists = File(File(gamePath), "$FLAVOR_DIR/${WowClientDownloader.X64_EXE_NAME}").exists()
+                        val exeLabel = when {
+                            isCn && x64Exists -> "x64 Binary (${WowClientDownloader.X64_EXE_NAME})"
+                            files.exeExists -> "ARM64 Binary ($EXE_NAME)"
+                            isCn -> "x64 / ARM64 Binary (downloads on Play)"
+                            else -> "ARM64 Binary (downloads on Play)"
+                        }
+                        CheckItem(label = exeLabel, ready = files.exeExists)
                         CheckItem(label = "Game Asset Archives (Data/)", ready = files.dataExists)
                         CheckItem(
                             label = when {
@@ -1109,8 +1118,13 @@ object GamePath {
 
     fun status(context: Context, path: String): Status {
         val root = File(path)
+        val region = GameRegion.saved(context) ?: GameRegion.current(context, path)
+        val isCn = region == GameRegion.CN
+        val arm64Exe = File(root, "$FLAVOR_DIR/$EXE_NAME")
+        val x64Exe = File(root, "$FLAVOR_DIR/${WowClientDownloader.X64_EXE_NAME}")
+        val exeExists = if (isCn) (x64Exe.exists() || arm64Exe.exists()) else arm64Exe.exists()
         return Status(
-            exeExists = File(root, "$FLAVOR_DIR/$EXE_NAME").exists(),
+            exeExists = exeExists,
             dataExists = File(root, "Data").listFiles()?.isNotEmpty() == true,
             buildInfoExists = File(root, BUILD_INFO).isFile,
             products = productsOf(root),
@@ -1293,6 +1307,7 @@ private const val DEFAULT_DRIVER = "Turnip-WoW-scheduler-test"
 private const val ADRENO_8XX_DRIVER = "Turnip-V32-RP6sched"
 private const val PROTON_VERSION = "proton-11.0-90624-arm64ec"
 private const val DXVK_VERSION = "2.4.1-wow-aarch64-test"
+private const val DXVK_X64_VERSION = "2.4.1-x64"
 
 private data class GpuProfile(val driver: String, val tuDebug: String, val screenSize: String, val label: String, val edition: String) {
     companion object {
@@ -1377,7 +1392,10 @@ private fun prepareLaunch(context: Context, gameRoot: File, gpu: GpuProfile, scr
     }
 
     val arm64Exe = File(gameRoot, "$FLAVOR_DIR/$EXE_NAME")
+    val x64Exe = File(gameRoot, "$FLAVOR_DIR/${WowClientDownloader.X64_EXE_NAME}")
     val currentRegion = GameRegion.saved(context) ?: GameRegion.current(context, gameRoot.path)
+    val isCn = currentRegion == GameRegion.CN
+    val useX64 = isCn && (x64Exe.exists() || !arm64Exe.exists())
     val webToken = BattleNetSignIn.loadWebToken(context)
     val hasValidSt = currentRegion == GameRegion.CN &&
         !webToken.isNullOrBlank() &&
@@ -1400,13 +1418,29 @@ private fun prepareLaunch(context: Context, gameRoot: File, gpu: GpuProfile, scr
         }
     }
 
-    // Ensure Wow-ARM64.exe exists or download it (UNCHANGED)
-    if (!arm64Exe.exists()) {
+    // Ensure client executable exists or download it
+    if (!x64Exe.exists() && !arm64Exe.exists()) {
         try {
-            WowClientDownloader.download(gameRoot, GameRegion.saved(context)?.name, onStatus)
+            WowClientDownloader.download(gameRoot, currentRegion?.name, onStatus)
         } catch (e: Exception) {
-            if (!arm64Exe.exists()) throw IllegalStateException("Couldn't download $EXE_NAME: ${e.message}", e)
-            Timber.w(e, "Client update check failed, launching the existing $EXE_NAME")
+            if (!x64Exe.exists() && !arm64Exe.exists()) throw IllegalStateException("Couldn't download client executable: ${e.message}", e)
+            Timber.w(e, "Client update check failed, launching the existing binary")
+        }
+    }
+
+    if (useX64) {
+        // Inject x64 DXVK directly to system32 if already extracted
+        val dxvkX64Dir = File(ContentsManager.getContentTypeDir(context, ContentProfile.ContentType.CONTENT_TYPE_DXVK), DXVK_X64_VERSION)
+        val d3d11 = File(dxvkX64Dir, "system32/d3d11.dll")
+        val dxgi = File(dxvkX64Dir, "system32/dxgi.dll")
+        if (d3d11.exists() && dxgi.exists()) {
+            val imageFs = ImageFs.find(context)
+            val sys32 = File(imageFs.rootDir, "${ImageFs.WINEPREFIX}/drive_c/windows/system32")
+            if (sys32.isDirectory) {
+                FileUtils.copy(d3d11, File(sys32, "d3d11.dll"))
+                FileUtils.copy(dxgi, File(sys32, "dxgi.dll"))
+                LauncherDebugLogger.log("P2_PREPARE", "Injected x64 DXVK (d3d11.dll & dxgi.dll) to system32")
+            }
         }
     }
 
@@ -1442,13 +1476,14 @@ private fun prepareLaunch(context: Context, gameRoot: File, gpu: GpuProfile, scr
         }
     } else {
         if (skipInjector) {
-            LauncherDebugLogger.log("P2_PREPARE", "Debug skip injector active: bypassing wrapper, will launch Wow-ARM64.exe directly with -d3d11")
+            val targetName = if (useX64) WowClientDownloader.X64_EXE_NAME else EXE_NAME
+            LauncherDebugLogger.log("P2_PREPARE", "Debug skip injector active: bypassing wrapper, will launch $targetName directly with -d3d11")
         }
     }
 
     onStatus("Configuring ${gpu.label} container...")
     val containerManager = ContainerManager(context)
-    val config = containerConfig(gameRoot, gpu, screenSize, useWrapper = useWrapper)
+    val config = containerConfig(gameRoot, gpu, screenSize, useWrapper = useWrapper, useX64 = useX64)
     val container = containerManager.getContainerById(CONTAINER_ID)
     if (container == null) {
         onStatus("Creating prefix environment (first boot)...")
@@ -1459,15 +1494,20 @@ private fun prepareLaunch(context: Context, gameRoot: File, gpu: GpuProfile, scr
     }
     check(containerManager.hasContainer(CONTAINER_ID)) { "Container creation failed. Check system storage and logs." }
 
-    LauncherDebugLogger.log("P2_PREPARE", "prepareLaunch completed (containerId=$CONTAINER_ID, useWrapper=$useWrapper, skipInjector=$skipInjector)")
+    LauncherDebugLogger.log("P2_PREPARE", "prepareLaunch completed (containerId=$CONTAINER_ID, useWrapper=$useWrapper, useX64=$useX64, skipInjector=$skipInjector)")
     return CONTAINER_ID
 }
 
-private fun containerConfig(gameRoot: File, gpu: GpuProfile, screenSize: String, useWrapper: Boolean): JSONObject {
+private fun containerConfig(gameRoot: File, gpu: GpuProfile, screenSize: String, useWrapper: Boolean, useX64: Boolean = false): JSONObject {
     val samsungEnv = if (Build.MANUFACTURER.equals("samsung", ignoreCase = true)) " FD_DEV_FEATURES=enable_tp_ubwc_flag_hint=1" else ""
     val envVars = "WRAPPER_MAX_IMAGE_COUNT=0 ZINK_DESCRIPTORS=lazy ZINK_DEBUG=compact,deck_emu MESA_SHADER_CACHE_DISABLE=false MESA_SHADER_CACHE_MAX_SIZE=512MB mesa_glthread=true WINEESYNC=0 MESA_VK_WSI_PRESENT_MODE=mailbox TU_DEBUG=${gpu.tuDebug} VKD3D_SHADER_MODEL=6_0 PULSE_LATENCY_MSEC=144$samsungEnv"
-    val targetExe = if (useWrapper) "G:\\$FLAVOR_DIR\\Wow-Launcher-ARM64.exe" else "G:\\$FLAVOR_DIR\\$EXE_NAME"
+    val targetExe = when {
+        useWrapper -> "G:\\$FLAVOR_DIR\\Wow-Launcher-ARM64.exe"
+        useX64 -> "G:\\$FLAVOR_DIR\\${WowClientDownloader.X64_EXE_NAME}"
+        else -> "G:\\$FLAVOR_DIR\\$EXE_NAME"
+    }
     val execArgs = if (useWrapper) "" else "-d3d11"
+    val dxvkVer = if (useX64) DXVK_X64_VERSION else DXVK_VERSION
 
     return JSONObject().apply {
         put("id", CONTAINER_ID)
@@ -1478,10 +1518,12 @@ private fun containerConfig(gameRoot: File, gpu: GpuProfile, screenSize: String,
         put("graphicsDriverVersion", gpu.driver)
         put("graphicsDriverConfig", "version=${gpu.driver},adrenotoolsTurnip=1,resourceType=buffer,bcnEmulation=auto,quality=high")
         put("displayRenderer", "vulkan")
-        put("dxwrapper", "dxvk-$DXVK_VERSION-1")
-        put("dxwrapperConfig", "version=$DXVK_VERSION-1")
+        put("dxwrapper", "dxvk-$dxvkVer-1")
+        put("dxwrapperConfig", "version=$dxvkVer-1")
         put("wineVersion", "$PROTON_VERSION-1")
         put("containerVariant", "bionic")
+        put("emulator", "box64")
+        put("box64Version", "0.4.2")
         put("fexcoreVersion", "2609-0")
         put("drives", "D:/storage/emulated/0/DownloadE:/data/data/app.wowforever/storageG:${gameRoot.path}")
         put("executablePath", targetExe)
@@ -1612,6 +1654,12 @@ private fun installBundledComponents(context: Context, onStatus: (String) -> Uni
     if (!File(dxvkDir, "profile.json").exists()) {
         onStatus("Extracting DXVK ARM64...")
         if (!extractBundledWcp(context, "dxvk-$DXVK_VERSION.wcp", dxvkDir)) Timber.e("Failed to extract DXVK")
+    }
+
+    val dxvkX64Dir = File(ContentsManager.getContentTypeDir(context, ContentProfile.ContentType.CONTENT_TYPE_DXVK), DXVK_X64_VERSION)
+    if (!File(dxvkX64Dir, "profile.json").exists()) {
+        onStatus("Extracting DXVK x64...")
+        if (!extractBundledWcp(context, "dxvk-$DXVK_X64_VERSION.wcp", dxvkX64Dir)) Timber.e("Failed to extract DXVK x64")
     }
 
     ImageFsInstaller.ensureBionicLib(context, ImageFs.find(context).rootDir)

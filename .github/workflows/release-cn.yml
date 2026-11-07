@@ -30,6 +30,7 @@ jobs:
 
       - name: Fetch & Verify Runtime Components
         run: |
+          which zstd >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y zstd; }
           chmod +x tools/fetch_components.sh
           ./tools/fetch_components.sh
 
@@ -103,20 +104,18 @@ jobs:
             ---
             
             ### 🌟 本次版本特性
-            1. **中国区（国服）原生适配**：
-               - 新增 `China (国服)` 区域与 Portal `CN`。
-               - 系统语言为中文或地区为 CN 时默认选中。
-               - 自动注入 `WTF/Config.wtf`（`SET portal "CN"`, `SET textLocale "zhCN"`, `SET audioLocale "zhCN"`）。
-            2. **国服 CDN 直连高速下载**：
-               - 免电脑直连下载 250MB 客户端 `Wow-ARM64.exe` 及后续流式游戏数据。
-               - 优先直连国服官方及网易/国内镜像节点（`cn.patch.battle.net:1119` 与 `blzdist-wow.necdn.leihuo.netease.com`），自动 fallback 至全球节点确保高可用。
-               - 本地 `.build.info` 正确记录 `cn` 分支与国内 CDN Hosts，避免 `CAS system was unable to initialize` 启动崩溃。
-            3. **安全加固与防泄露机制**：
-               - 彻底移除输入法软键盘与按键日志记录，杜绝密码泄露进系统 Logcat 与本地崩溃日志。
-               - 加固 `login.txt` 生命周期：启动 25 秒后台自动擦除（0 覆写删除），退出游戏或返回启动器时强制彻底销毁。
-               - 保留纯手动游戏内登录模式，可不配置保存账号直接启动进入游戏中文登录框输入。
-            4. **二进制完整性保证**：
-               - 所有预打包 Wine/Proton/DXVK/Turnip 运行时组件均通过 SHA256 哈希比对校验。
+            1. **国服官方 x64 客户端原生支持（彻底解决 WOW51900243 鉴权拒绝）**：
+               - 识别并拉取网易/国服专属 x64 客户端（`Wow.exe`，MD5 `96b9b23b...`，Tags 包含 CN 与 x86_64）；优先兼容用户手动放置的文件。
+               - 原生 ARM64 PE 启动包装器 `Wow-Launcher-ARM64.exe` 自动感知 `Wow.exe`，优先以 `-d3d11 -launcherlogin -uid wowf` 启动 x64 客户端，消除客户端平台判定差异（`platform="Wn64"` 对齐 PC 成功日志）。
+            2. **wowbox64 + Box64 CPU 翻译与 x64 DXVK 运行时**：
+               - 适配 Proton 11 ARM64EC 下基于 `wowbox64.dll` 与 `/usr/bin/box64` 的 64 位 x86_64 翻译管道，设置 `HODLL`/`HODLL64` 与 Dynarec 安全参数。
+               - 引入 x64 DXVK 2.4.1（AMD64 PE `d3d11.dll` / `dxgi.dll`），随 x64 客户端动态注入 Wine `system32`。
+            3. **中国区（国服）原生授权与配置**：
+               - 新增 `China (国服)` 区域与网易通行证 OAuth ST 授权流。
+               - 包装器 Wine 内 DPAPI 加密并注入国服特供 Launch Options 与 BNA 注册表键。
+            4. **安全加固与二进制校验**：
+               - 敏感凭证 0 覆写安全粉碎，日志绝对脱敏。
+               - 运行时组件全部通过 SHA256 完整性校验。
           files: ${{ steps.prepare_asset.outputs.apk_path }}
           draft: false
           prerelease: false

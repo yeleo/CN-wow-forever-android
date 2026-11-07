@@ -25,9 +25,12 @@
 static const wchar_t* const TOKEN_FILE_PATH   = L"E:\\bnet_token.tmp";
 static const wchar_t* const LOG_DIR_PATH      = L"G:\\_forever_\\Logs";
 static const wchar_t* const LOG_FILE_PATH     = L"G:\\_forever_\\Logs\\launcher_wrapper.log";
-static const wchar_t* const GAME_EXE_PATH     = L"G:\\_forever_\\Wow-ARM64.exe";
+static const wchar_t* const GAME_X64_EXE_PATH = L"G:\\_forever_\\Wow.exe";
+static const wchar_t* const GAME_ARM64_EXE_PATH = L"G:\\_forever_\\Wow-ARM64.exe";
+static const wchar_t* const X64_FLAG_PATH     = L"G:\\_forever_\\use_x64.flag";
 static const wchar_t* const GAME_WORKING_DIR  = L"G:\\_forever_";
-static const wchar_t* const GAME_CMD_LINE     = L"\"G:\\_forever_\\Wow-ARM64.exe\" -d3d11 -launcherlogin -uid wowf";
+static const wchar_t* const GAME_X64_CMD_LINE = L"\"G:\\_forever_\\Wow.exe\" -d3d11 -launcherlogin -uid wowf";
+static const wchar_t* const GAME_ARM64_CMD_LINE = L"\"G:\\_forever_\\Wow-ARM64.exe\" -d3d11 -launcherlogin -uid wowf";
 static const wchar_t* const REG_KEY_PATH      = L"Software\\Blizzard Entertainment\\Battle.net\\Launch Options\\WoW";
 static const wchar_t* const REG_BNA_KEY_PATH  = L"Software\\Blizzard Entertainment\\Battle.net\\Launch Options\\BNA";
 
@@ -176,6 +179,16 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     }
     LogStep("DPAPI_ENCRYPT_SUCCESS", 0);
 
+    // Step 5b: Detect Launch Target (x64 Wow.exe vs ARM64 Wow-ARM64.exe)
+    BOOL useX64 = FALSE;
+    if (GetFileAttributesW(GAME_X64_EXE_PATH) != INVALID_FILE_ATTRIBUTES ||
+        GetFileAttributesW(X64_FLAG_PATH) != INVALID_FILE_ATTRIBUTES) {
+        useX64 = TRUE;
+        LogStep("LAUNCH_TARGET_X64", 0);
+    } else {
+        LogStep("LAUNCH_TARGET_ARM64", 0);
+    }
+
     // Step 6: Write Registry
     HKEY hKey = NULL;
     DWORD disposition = 0;
@@ -211,7 +224,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     RegSetValueExA(hKey, "LOCALE_AUDIO", 0, REG_SZ, (const BYTE *)"zhCN", 5);
     RegSetValueExA(hKey, "CONNECTION_STRING", 0, REG_SZ, (const BYTE *)"", 1);
     RegSetValueExA(hKey, "GAME_ACCOUNT", 0, REG_SZ, (const BYTE *)"", 1);
-    RegSetValueExA(hKey, "LAUNCH_64BIT", 0, REG_SZ, (const BYTE *)"false", 6);
+    if (useX64) {
+        RegSetValueExA(hKey, "LAUNCH_64BIT", 0, REG_SZ, (const BYTE *)"true", 5);
+    } else {
+        RegSetValueExA(hKey, "LAUNCH_64BIT", 0, REG_SZ, (const BYTE *)"false", 6);
+    }
 
     RegFlushKey(hKey);
     RegCloseKey(hKey);
@@ -263,7 +280,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     RegCloseKey(hBnaKey);
     LogStep("REG_BNA_WRITE_SUCCESS", 0);
 
-    // Step 7: Launch Wow-ARM64.exe
+    // Step 7: Launch target game executable
     STARTUPINFOW si;
     ZeroMemory(&si, sizeof(si));
     si.cb = sizeof(si);
@@ -271,12 +288,15 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     PROCESS_INFORMATION pi;
     ZeroMemory(&pi, sizeof(pi));
 
+    const wchar_t *targetExe = useX64 ? GAME_X64_EXE_PATH : GAME_ARM64_EXE_PATH;
+    const wchar_t *targetCmd = useX64 ? GAME_X64_CMD_LINE : GAME_ARM64_CMD_LINE;
+
     wchar_t cmdLine[1024];
-    wcsncpy(cmdLine, GAME_CMD_LINE, sizeof(cmdLine) / sizeof(wchar_t) - 1);
+    wcsncpy(cmdLine, targetCmd, sizeof(cmdLine) / sizeof(wchar_t) - 1);
     cmdLine[sizeof(cmdLine) / sizeof(wchar_t) - 1] = L'\0';
 
     BOOL created = CreateProcessW(
-        GAME_EXE_PATH,
+        targetExe,
         cmdLine,
         NULL,
         NULL,
@@ -296,7 +316,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
 
     LogStep("GAME_PROCESS_STARTED", 0);
 
-    // Step 8: Wait for Wow-ARM64.exe to exit and forward exit code
+    // Step 8: Wait for target process to exit and forward exit code
     WaitForSingleObject(pi.hProcess, INFINITE);
 
     DWORD exitCode = 0;
