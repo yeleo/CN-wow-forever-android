@@ -56,8 +56,8 @@ jobs:
           export PATH="/opt/llvm-mingw/bin:$PATH"
           mkdir -p app/src/main/assets
 
-          # Build ARM64 wrapper (dynamic loading of crypt32 to eliminate static import dependency)
-          aarch64-w64-mingw32-clang -O2 -s -static -o app/src/main/assets/Wow-Launcher-ARM64.exe tools/wow_launcher/launcher.c -ladvapi32 -lkernel32
+          # Build ARM64 wrapper (dynamic loading of crypt32, GUI subsystem to prevent black console window)
+          aarch64-w64-mingw32-clang -O2 -s -static -mwindows -o app/src/main/assets/Wow-Launcher-ARM64.exe tools/wow_launcher/launcher.c -ladvapi32 -lkernel32
           ls -la app/src/main/assets/Wow-Launcher-ARM64.exe
 
           # Build x86_64 diagnostic probe

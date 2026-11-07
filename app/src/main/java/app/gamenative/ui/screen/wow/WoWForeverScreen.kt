@@ -1586,8 +1586,8 @@ private fun prepareLaunch(context: Context, gameRoot: File, gpu: GpuProfile, scr
 
 private fun containerConfig(gameRoot: File, gpu: GpuProfile, screenSize: String, useWrapper: Boolean, useX64: Boolean = false): JSONObject {
     val samsungEnv = if (Build.MANUFACTURER.equals("samsung", ignoreCase = true)) " FD_DEV_FEATURES=enable_tp_ubwc_flag_hint=1" else ""
-    val wineDebugEnv = " WINEDEBUG=err+all,warn+module,+loaddll,+seh"
-    val fexEnv = " FEX_TSOENABLED=1 FEX_HALFBARRIERTSOENABLED=1 FEX_MULTIBLOCK=1 FEX_VECTORTSOENABLED=0 FEX_MEMCPYSETTSOENABLED=1 FEX_SMCCHECKS=full FEX_HIDEHYPERVISORBIT=1 FEX_HIDEHYBRID=1"
+    val wineDebugEnv = " WINEDEBUG=-all"
+    val fexEnv = " FEX_TSOENABLED=1 FEX_HALFBARRIERTSOENABLED=1 FEX_MULTIBLOCK=1 FEX_VECTORTSOENABLED=0 FEX_MEMCPYSETTSOENABLED=1 FEX_SMCCHECKS=full FEX_HIDEHYPERVISORBIT=1 FEX_HIDEHYBRID=1 FEX_SMALLTSCSCALE=1 FEX_VOLATILEMETADATA=1"
     val envVars = "WRAPPER_MAX_IMAGE_COUNT=0 ZINK_DESCRIPTORS=lazy ZINK_DEBUG=compact,deck_emu MESA_SHADER_CACHE_DISABLE=false MESA_SHADER_CACHE_MAX_SIZE=512MB mesa_glthread=true WINEESYNC=0 MESA_VK_WSI_PRESENT_MODE=mailbox TU_DEBUG=${gpu.tuDebug} VKD3D_SHADER_MODEL=6_0 PULSE_LATENCY_MSEC=144$samsungEnv$wineDebugEnv$fexEnv"
     val targetExe = when {
         useWrapper -> "G:\\$FLAVOR_DIR\\Wow-Launcher-ARM64.exe"

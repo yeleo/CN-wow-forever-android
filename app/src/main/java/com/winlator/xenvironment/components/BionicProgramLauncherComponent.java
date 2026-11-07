@@ -392,8 +392,8 @@ public class BionicProgramLauncherComponent extends GuestProgramLauncherComponen
         }
 
         if (wineInfo != null && wineInfo.isArm64EC()) {
-            if (!envVars.has("WINEDEBUG") || envVars.get("WINEDEBUG").equals("-all")) {
-                envVars.put("WINEDEBUG", "err+all,warn+module,+loaddll,+seh");
+            if (!envVars.has("WINEDEBUG")) {
+                envVars.put("WINEDEBUG", "-all");
             }
         }
 
@@ -528,6 +528,8 @@ public class BionicProgramLauncherComponent extends GuestProgramLauncherComponen
                 envVars.put("FEX_SMCCHECKS", "full");
                 envVars.put("FEX_HIDEHYPERVISORBIT", "1");
                 envVars.put("FEX_HIDEHYBRID", "1");
+                envVars.put("FEX_SMALLTSCSCALE", "1");
+                envVars.put("FEX_VOLATILEMETADATA", "1");
             } else {
                 envVars.put("HODLL", "wowbox64.dll");
                 envVars.put("HODLL64", "wowbox64.dll");

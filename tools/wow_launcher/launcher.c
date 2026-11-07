@@ -685,8 +685,8 @@ static void RunX64ProbeIfPresent(void) {
 /* ========================================================================= */
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine, int nCmdShow) {
-    // Step 0: Ensure child processes inherit full WINEDEBUG logging
-    SetEnvironmentVariableW(L"WINEDEBUG", L"err+all,warn+module,+loaddll");
+    // Step 0: Ensure child processes disable verbose WINEDEBUG logging
+    SetEnvironmentVariableW(L"WINEDEBUG", L"-all");
 
     LogStep("WRAPPER_START", 0);
 
@@ -875,69 +875,21 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
         SetEnvironmentVariableW(L"FEX_SMCCHECKS", L"full");
         SetEnvironmentVariableW(L"FEX_HIDEHYPERVISORBIT", L"1");
         SetEnvironmentVariableW(L"FEX_HIDEHYBRID", L"1");
+        SetEnvironmentVariableW(L"FEX_SMALLTSCSCALE", L"1");
+        SetEnvironmentVariableW(L"FEX_VOLATILEMETADATA", L"1");
         SetEnvironmentVariableW(L"WINEDLLOVERRIDES", L"d3d11,dxgi=n,b");
         LogRaw("[ENV_SET] Configured FEXCore (SMCCHECKS=full, MULTIBLOCK=1, HIDEHYPERVISOR) and WINEDLLOVERRIDES=d3d11,dxgi=n,b for x64 execution");
 
-        LogRaw("=== PE HEADER & IMPORT SCAN (Wow.exe) ===");
+        LogRaw("=== PE HEADER (Wow.exe) ===");
         LogPEHeaderDetails(GAME_X64_EXE_PATH, "Wow.exe");
-        s_scannedCount = 0;
-        MarkScanned("Wow.exe");
-        ScanPEImports(GAME_X64_EXE_PATH, "Wow.exe", 1);
-
-        // Also proactively scan dependencies of known companion binaries in G:\_forever_ directory
-        for (size_t c = 0; c < sizeof(s_companionDlls) / sizeof(s_companionDlls[0]); c++) {
-            if (GetFileAttributesW(s_companionDlls[c]) != INVALID_FILE_ATTRIBUTES) {
-                char label[64] = {0};
-                const wchar_t *fn = wcsrchr(s_companionDlls[c], L'\\');
-                if (fn) fn++; else fn = s_companionDlls[c];
-                WideCharToMultiByte(CP_ACP, 0, fn, -1, label, sizeof(label) - 1, NULL, NULL);
-                if (!HasScanned(label)) {
-                    MarkScanned(label);
-                    ScanPEImports(s_companionDlls[c], label, 1);
-                }
-            }
-        }
-
-        RunX64ProbeIfPresent();
     }
 
-    // Step 7: Configure Wine debug stderr redirection (including +seh for exception tracing)
-    SetEnvironmentVariableW(L"WINEDEBUG", L"err+all,warn+module,+loaddll,+seh");
-
-    // Rotate/truncate wine_debug.log if > 20MB
-    HANDLE hCheck = CreateFileW(WINE_DEBUG_LOG_PATH, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
-    if (hCheck != INVALID_HANDLE_VALUE) {
-        DWORD fSize = GetFileSize(hCheck, NULL);
-        CloseHandle(hCheck);
-        if (fSize > 20 * 1024 * 1024) {
-            DeleteFileW(WINE_DEBUG_LOG_PATH);
-            LogRaw("[WINE_DEBUG_LOG] Truncated wine_debug.log exceeding 20MB");
-        }
-    }
-
-    SECURITY_ATTRIBUTES sa;
-    ZeroMemory(&sa, sizeof(sa));
-    sa.nLength = sizeof(sa);
-    sa.bInheritHandle = TRUE;
-
-    HANDLE hWineStderr = CreateFileW(
-        WINE_DEBUG_LOG_PATH,
-        FILE_APPEND_DATA,
-        FILE_SHARE_READ | FILE_SHARE_WRITE,
-        &sa,
-        OPEN_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL,
-        NULL
-    );
+    // Step 7: Disable Wine debug logging completely to avoid disk I/O bottlenecks during unpacker loops
+    SetEnvironmentVariableW(L"WINEDEBUG", L"-all");
 
     STARTUPINFOW si;
     ZeroMemory(&si, sizeof(si));
     si.cb = sizeof(si);
-    if (hWineStderr != INVALID_HANDLE_VALUE) {
-        si.dwFlags |= STARTF_USESTDHANDLES;
-        si.hStdError = hWineStderr;
-        si.hStdOutput = hWineStderr;
-    }
 
     PROCESS_INFORMATION pi;
     ZeroMemory(&pi, sizeof(pi));
@@ -954,17 +906,13 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
         cmdLine,
         NULL,
         NULL,
-        TRUE, // Inherit handles for stderr redirection
+        FALSE,
         0,
         NULL,
         GAME_WORKING_DIR,
         &si,
         &pi
     );
-
-    if (hWineStderr != INVALID_HANDLE_VALUE) {
-        CloseHandle(hWineStderr);
-    }
 
     if (!created) {
         DWORD err = GetLastError();
