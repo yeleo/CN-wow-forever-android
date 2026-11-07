@@ -461,7 +461,7 @@ fun WoWForeverScreen(
                         val isCn = currentRegion == GameRegion.CN
                         val clientFilesReady = if (isCn) files.clientReady else files.exeExists
                         val exeLabel = when {
-                            isCn && files.clientReady -> "游戏客户端文件 (x64 核心组件已完整就绪)"
+                            isCn && files.clientReady -> "游戏客户端文件 (x64 客户端已就绪)"
                             isCn && files.exeExists -> "游戏客户端文件 (x64 组件不完整，点击播放自动补全)"
                             files.exeExists -> "ARM64 Binary ($EXE_NAME)"
                             isCn -> "游戏客户端文件 (x64 客户端，点击播放自动下载)"

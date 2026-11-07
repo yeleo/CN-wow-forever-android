@@ -27,27 +27,19 @@ object WowClientDownloader {
     // Optional debug switch: allow downloading ARM64 client binaries for A/B testing (defaults to false)
     var ALLOW_DOWNLOAD_ARM64 = false
 
-    // Verified required x64 client files and their exact byte sizes (v1.60.1.70840)
-    val EXPECTED_X64_FILES = mapOf(
-        "Wow.exe" to 109_815_504L,
-        "wow_loader.dll" to 41_043_152L,
-        "GFSDK_Aftermath_Lib.x64.dll" to 5_570_136L,
-        "icudt78l.dat" to 15_450_560L,
-        "libxell.dll" to 359_792L,
-        "BlizzardError.exe" to 796_296L,
+    // Official NetEase / Blizzard CN CDN servers
+    val OFFICIAL_CN_CDN_HOSTS = listOf(
+        "blzdist-wow.necdn.leihuo.netease.com",
+        "client01.pdl.wow.battlenet.com.cn",
+        "level3.blizzard.cn.edgesuite.net",
     )
 
     private val KNOWN_REGION_TAGS = setOf("CN", "US", "EU", "KR", "TW")
 
     fun isX64ClientReady(gameRoot: File): Boolean {
         val clientDir = File(gameRoot, FLAVOR_DIR)
-        for ((name, expectedSize) in EXPECTED_X64_FILES) {
-            val f = File(clientDir, name)
-            if (!f.isFile || f.length() != expectedSize) {
-                return false
-            }
-        }
-        return true
+        val wowExe = File(clientDir, X64_EXE_NAME)
+        return wowExe.isFile && wowExe.length() > 0
     }
 
     // The pre-release beta. Its Data/ archives are shared with the full release, so beta installs upgrade in place.
@@ -175,7 +167,7 @@ object WowClientDownloader {
 
         val parsedHosts = (cdnsRow?.get("Hosts") ?: localRow?.get("CDN Hosts"))?.let(::splitHosts).orEmpty()
         val remoteCdnHosts = if (isCn) {
-            (parsedHosts + listOf("level3.blizzard.com", "us.cdn.blizzard.com")).distinct()
+            (OFFICIAL_CN_CDN_HOSTS + parsedHosts + listOf("level3.blizzard.com", "us.cdn.blizzard.com")).distinct()
         } else {
             parsedHosts.ifEmpty { DEFAULT_CDN_HOSTS }
         }
@@ -267,7 +259,15 @@ object WowClientDownloader {
         val effectiveRegion = regionCode ?: row["Branch"]
         val localVersion = row["Version"]?.trim()
 
-        val cdn = Cdn(hosts = splitHosts(row.getValue("CDN Hosts")), path = row.getValue("CDN Path"))
+        val isCn = effectiveRegion?.equals("CN", ignoreCase = true) == true ||
+            (effectiveRegion == null && defaultBranch() == "cn")
+        val parsedHosts = splitHosts(row.getValue("CDN Hosts"))
+        val cdnHosts = if (isCn) {
+            (OFFICIAL_CN_CDN_HOSTS + parsedHosts + listOf("level3.blizzard.com")).distinct()
+        } else {
+            parsedHosts.ifEmpty { DEFAULT_CDN_HOSTS }
+        }
+        val cdn = Cdn(hosts = cdnHosts, path = row.getValue("CDN Path"))
         val buildKey = row.getValue("Build Key")
         val buildConfigRaw = cdn.require("config", buildKey)
         val buildConfig = parseConfig(String(buildConfigRaw))
@@ -320,19 +320,14 @@ object WowClientDownloader {
             LauncherDebugLogger.log("MANIFEST_AUDIT", "  EXCLUDED: ${item.entry.name} (size=${item.entry.size}, reason=${item.reason})")
         }
 
-        // Step 2: Hard assertion for verified x64 client files
+        // Step 2: Manifest-driven integrity validation
+        check(accepted.isNotEmpty()) { "No client files selected from official manifest for build ${expectedVersion ?: "unknown"}" }
         if (!ALLOW_DOWNLOAD_ARM64) {
-            for ((expectedName, expectedSize) in EXPECTED_X64_FILES) {
-                val match = accepted.firstOrNull { it.name.equals(expectedName, ignoreCase = true) }
-                    ?: throw IllegalStateException("Manifest assertion failed: required file '$expectedName' was not selected!")
-                if (match.size != expectedSize) {
-                    throw IllegalStateException("Manifest assertion failed: file '$expectedName' expected size $expectedSize but manifest has ${match.size}!")
-                }
+            check(accepted.any { it.name.equals(X64_EXE_NAME, ignoreCase = true) }) {
+                "Manifest does not contain required main executable '$X64_EXE_NAME' for build ${expectedVersion ?: "unknown"}"
             }
-            LauncherDebugLogger.log("MANIFEST_AUDIT", "Hard assertion passed: all 6 verified x64 files are present with identical sizes.")
         }
-
-        check(accepted.isNotEmpty()) { "No client files selected for this build" }
+        LauncherDebugLogger.log("MANIFEST_AUDIT", "Manifest parsing complete: ${accepted.size} client files dynamically selected from official manifest.")
 
         val clientDir = File(gameRoot, FLAVOR_DIR)
         clientDir.mkdirs()
@@ -489,7 +484,7 @@ object WowClientDownloader {
             ?: defaultBranch()
         val region = effectiveBranch.uppercase(Locale.ROOT)
 
-        val fallbackHosts = if (region == "CN") listOf("blzdist-wow.necdn.leihuo.netease.com", "level3.blizzard.com", "us.cdn.blizzard.com") else DEFAULT_CDN_HOSTS
+        val fallbackHosts = if (region == "CN") (OFFICIAL_CN_CDN_HOSTS + listOf("level3.blizzard.com", "us.cdn.blizzard.com")).distinct() else DEFAULT_CDN_HOSTS
         val cdnHosts = target.remoteCdnHosts.ifEmpty { fallbackHosts }
         val cdnServers = target.remoteCdnServers.ifEmpty { cdnHosts.map { "http://$it/?maxhosts=4" } }
 
