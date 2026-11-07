@@ -56,6 +56,7 @@ import java.io.File
 object LauncherDebugLogger {
     private val dateFormat = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US)
     private var customLogDir: File? = null
+    private var sessionInitialized = false
 
     fun setLogDirectory(dir: File) {
         customLogDir = dir
@@ -70,11 +71,40 @@ object LauncherDebugLogger {
     }
 
     @Synchronized
+    fun initSession() {
+        try {
+            val file = getLogFile()
+            val header = "[BUILD] commit=${app.gamenative.BuildConfig.GIT_COMMIT} built=${app.gamenative.BuildConfig.BUILD_TIME} branch=CN\n"
+            file.writeText(header, Charsets.UTF_8)
+            sessionInitialized = true
+        } catch (e: Exception) {
+            Timber.w(e, "Failed to init launcher debug log session")
+        }
+    }
+
+    @Synchronized
     fun log(tag: String, message: String) {
+        val file = getLogFile()
+        if (!sessionInitialized || !file.exists() || file.length() == 0L) {
+            val header = "[BUILD] commit=${app.gamenative.BuildConfig.GIT_COMMIT} built=${app.gamenative.BuildConfig.BUILD_TIME} branch=CN\n"
+            try {
+                if (!file.exists() || file.length() == 0L) {
+                    file.writeText(header, Charsets.UTF_8)
+                } else if (!sessionInitialized) {
+                    java.io.FileOutputStream(file, true).use { fos ->
+                        fos.write(header.toByteArray(Charsets.UTF_8))
+                        fos.flush()
+                        fos.fd.sync()
+                    }
+                }
+                sessionInitialized = true
+            } catch (e: Exception) {
+                Timber.w(e, "Failed to write build header to launcher debug log")
+            }
+        }
         val timestamp = dateFormat.format(java.util.Date())
         val line = "[$timestamp] [$tag] $message\n"
         try {
-            val file = getLogFile()
             java.io.FileOutputStream(file, true).use { fos ->
                 val bytes = line.toByteArray(Charsets.UTF_8)
                 fos.write(bytes)

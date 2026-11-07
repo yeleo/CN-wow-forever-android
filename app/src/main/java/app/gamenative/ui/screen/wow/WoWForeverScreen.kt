@@ -219,6 +219,7 @@ fun WoWForeverScreen(
             return
         }
         val skipInjector = isDebugSkipInjector(context)
+        LauncherDebugLogger.initSession()
         LauncherDebugLogger.log("P1_LAUNCH", "launchGame entry: region=${region.name}, skipInjector=$skipInjector")
         isLaunching = true
         errorMessage = null
@@ -440,7 +441,8 @@ fun WoWForeverScreen(
                     color = WowGold
                 )
                 Spacer(modifier = Modifier.height(6.dp))
-                Text(text = "${gpu.edition} Edition", fontSize = 11.sp, color = WowSubtle)
+                val commitDisplay = if (BuildConfig.GIT_COMMIT.isNotBlank()) " • commit ${BuildConfig.GIT_COMMIT}" else ""
+                Text(text = "${gpu.edition} Edition$commitDisplay", fontSize = 11.sp, color = WowSubtle)
             }
 
             Spacer(modifier = Modifier.height(20.dp))
@@ -513,13 +515,14 @@ fun WoWForeverScreen(
                                 ready = true,
                             )
                         }
+                        val commitSuffix = if (BuildConfig.GIT_COMMIT.isNotBlank()) " (commit: ${BuildConfig.GIT_COMMIT})" else ""
                         appUpdate?.let {
                             CheckItem(
-                                label = "App Build: v${BuildConfig.VERSION_NAME} (v${it.version} available)",
+                                label = "App Build: v${BuildConfig.VERSION_NAME}$commitSuffix (v${it.version} available)",
                                 ready = false,
                             )
                         } ?: CheckItem(
-                            label = "App Build: v${BuildConfig.VERSION_NAME}",
+                            label = "App Build: v${BuildConfig.VERSION_NAME}$commitSuffix",
                             ready = true,
                         )
                         versionStatus?.let { version ->
@@ -1558,8 +1561,14 @@ private fun prepareLaunch(context: Context, gameRoot: File, gpu: GpuProfile, scr
                 "P2_PREPARE",
                 "Staged bnet_token.tmp to ${eTmp.path} (size: ${eTmp.length()} bytes, token len=${webToken!!.length}, regexMatch=true)"
             )
+            // Stage build_commit.tmp to E:\build_commit.tmp and G:\_forever_\build_commit.tmp
+            val eCommit = File(storageDir, "build_commit.tmp")
+            eCommit.writeText("${BuildConfig.GIT_COMMIT}\n", Charsets.UTF_8)
+            val gCommit = File(gameRoot, "$FLAVOR_DIR/build_commit.tmp")
+            gCommit.writeText("${BuildConfig.GIT_COMMIT}\n", Charsets.UTF_8)
+            LauncherDebugLogger.log("P2_PREPARE", "Staged build_commit.tmp to ${eCommit.path} and ${gCommit.path} (commit=${BuildConfig.GIT_COMMIT})")
         } catch (e: Exception) {
-            Timber.e(e, "Failed to stage bnet_token.tmp")
+            Timber.e(e, "Failed to stage bnet_token.tmp or build_commit.tmp")
             LauncherDebugLogger.logException("P2_PREPARE", "StageToken", e)
         }
     } else {
@@ -1590,7 +1599,8 @@ private fun containerConfig(gameRoot: File, gpu: GpuProfile, screenSize: String,
     val samsungEnv = if (Build.MANUFACTURER.equals("samsung", ignoreCase = true)) " FD_DEV_FEATURES=enable_tp_ubwc_flag_hint=1" else ""
     val wineDebugEnv = " WINEDEBUG=err+all,+loaddll,+module"
     val fexEnv = " FEX_TSOENABLED=1 FEX_HALFBARRIERTSOENABLED=1 FEX_MULTIBLOCK=1 FEX_VECTORTSOENABLED=0 FEX_MEMCPYSETTSOENABLED=1 FEX_SMCCHECKS=full FEX_HIDEHYPERVISORBIT=1 FEX_HIDEHYBRID=1 FEX_SMALLTSCSCALE=1 FEX_VOLATILEMETADATA=1"
-    val envVars = "WRAPPER_MAX_IMAGE_COUNT=0 ZINK_DESCRIPTORS=lazy ZINK_DEBUG=compact,deck_emu MESA_SHADER_CACHE_DISABLE=false MESA_SHADER_CACHE_MAX_SIZE=512MB mesa_glthread=true WINEESYNC=0 MESA_VK_WSI_PRESENT_MODE=mailbox TU_DEBUG=${gpu.tuDebug} VKD3D_SHADER_MODEL=6_0 PULSE_LATENCY_MSEC=144$samsungEnv$wineDebugEnv$fexEnv"
+    val commitEnv = " WOW_BUILD_COMMIT=${BuildConfig.GIT_COMMIT} GIT_COMMIT=${BuildConfig.GIT_COMMIT}"
+    val envVars = "WRAPPER_MAX_IMAGE_COUNT=0 ZINK_DESCRIPTORS=lazy ZINK_DEBUG=compact,deck_emu MESA_SHADER_CACHE_DISABLE=false MESA_SHADER_CACHE_MAX_SIZE=512MB mesa_glthread=true WINEESYNC=0 MESA_VK_WSI_PRESENT_MODE=mailbox TU_DEBUG=${gpu.tuDebug} VKD3D_SHADER_MODEL=6_0 PULSE_LATENCY_MSEC=144$samsungEnv$wineDebugEnv$fexEnv$commitEnv"
     val targetExe = when {
         useWrapper -> "G:\\$FLAVOR_DIR\\Wow-Launcher-ARM64.exe"
         useX64 -> "G:\\$FLAVOR_DIR\\${WowClientDownloader.X64_EXE_NAME}"

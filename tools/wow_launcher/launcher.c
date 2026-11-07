@@ -687,12 +687,47 @@ static void LogDirStats(void) {
     FindClose(hFind);
 }
 
+static void InitWrapperLog(void) {
+    CreateDirectoryW(LOG_DIR_PATH, NULL);
+    FILE *fp = _wfopen(LOG_FILE_PATH, L"w");
+    if (!fp) return;
+
+    char commitBuf[64] = {0};
+    if (GetEnvironmentVariableA("WOW_BUILD_COMMIT", commitBuf, sizeof(commitBuf)) == 0 || commitBuf[0] == '\0') {
+        if (GetEnvironmentVariableA("GIT_COMMIT", commitBuf, sizeof(commitBuf)) == 0 || commitBuf[0] == '\0') {
+            FILE *fpCommit = _wfopen(L"E:\\build_commit.tmp", L"r");
+            if (!fpCommit) fpCommit = _wfopen(L"G:\\_forever_\\build_commit.tmp", L"r");
+            if (fpCommit) {
+                if (fgets(commitBuf, sizeof(commitBuf), fpCommit)) {
+                    TrimString(commitBuf);
+                }
+                fclose(fpCommit);
+            }
+        }
+    }
+#ifdef BUILD_COMMIT
+    if (commitBuf[0] == '\0') {
+        strncpy(commitBuf, BUILD_COMMIT, sizeof(commitBuf) - 1);
+    }
+#endif
+    if (commitBuf[0] == '\0') {
+        strncpy(commitBuf, "unknown", sizeof(commitBuf) - 1);
+    }
+
+    fprintf(fp, "[BUILD] commit=%s\n", commitBuf);
+    fflush(fp);
+    fclose(fp);
+}
+
 /* ========================================================================= */
 /* Main Entry Point                                                         */
 /* ========================================================================= */
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine, int nCmdShow) {
-    // Step 0: Preserve container WINEDEBUG or default to diagnostic err+all,+loaddll,+module
+    // Step 0a: Initialize wrapper log with build commit header as line 1
+    InitWrapperLog();
+
+    // Step 0b: Preserve container WINEDEBUG or default to diagnostic err+all,+loaddll,+module
     wchar_t curWineDebug[256] = {0};
     if (!GetEnvironmentVariableW(L"WINEDEBUG", curWineDebug, sizeof(curWineDebug) / sizeof(wchar_t)) || curWineDebug[0] == L'\0') {
         SetEnvironmentVariableW(L"WINEDEBUG", L"err+all,+loaddll,+module");

@@ -49,6 +49,21 @@ android {
         versionName = "2.3.3"
 
         buildConfigField("boolean", "GOLD", "false")
+
+        val gitCommit = (project.findProperty("gitCommit") as? String)
+            ?: System.getenv("GIT_COMMIT_SHORT")
+            ?: try {
+                val proc = ProcessBuilder("git", "rev-parse", "--short", "HEAD").start()
+                proc.inputStream.bufferedReader().readText().trim()
+            } catch (e: Exception) {
+                "unknown"
+            }
+        val buildTime = (project.findProperty("buildTime") as? String)
+            ?: System.getenv("BUILD_TIME")
+            ?: java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US).format(java.util.Date())
+
+        buildConfigField("String", "GIT_COMMIT", "\"$gitCommit\"")
+        buildConfigField("String", "BUILD_TIME", "\"$buildTime\"")
         val iconValue = "@mipmap/ic_launcher"
         val iconRoundValue = "@mipmap/ic_launcher_round"
         manifestPlaceholders.putAll(

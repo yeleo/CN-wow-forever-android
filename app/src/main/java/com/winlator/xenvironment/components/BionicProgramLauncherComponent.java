@@ -466,6 +466,7 @@ public class BionicProgramLauncherComponent extends GuestProgramLauncherComponen
         try {
             java.io.FileWriter writer = new java.io.FileWriter(linuxWineBootLog, false);
             writer.write("=== LINUX WINE BOOT START ===\n");
+            writer.write("[BUILD] commit=" + BuildConfig.GIT_COMMIT + " built=" + BuildConfig.BUILD_TIME + " branch=CN\n");
             writer.write("Timestamp: " + new java.util.Date() + "\n");
             writer.write("Command: " + command + "\n");
             writer.write("WorkingDir: " + (workingDir != null ? workingDir.getAbsolutePath() : rootDir.getAbsolutePath()) + "\n");
