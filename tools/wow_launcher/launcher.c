@@ -716,7 +716,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
         MarkScanned("Wow.exe");
         ScanPEImports(GAME_X64_EXE_PATH, "Wow.exe", 1);
 
-        // Also proactively scan dependencies of known companion binaries in G:\_forever_\
+        // Also proactively scan dependencies of known companion binaries in G:\_forever_ directory
         for (size_t c = 0; c < sizeof(s_companionDlls) / sizeof(s_companionDlls[0]); c++) {
             if (GetFileAttributesW(s_companionDlls[c]) != INVALID_FILE_ATTRIBUTES) {
                 char label[64] = {0};
