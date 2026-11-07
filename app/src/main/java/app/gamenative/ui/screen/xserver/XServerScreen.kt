@@ -3621,9 +3621,14 @@ private fun setupXEnvironment(
         if (logFile.exists()) logFile.delete()
     }
 
+    val foreverLogsDir = File("/storage/emulated/0/WoW Forever/_forever_/Logs")
+    if (isWowContainer && !foreverLogsDir.exists()) foreverLogsDir.mkdirs()
+    val linuxWineBootLog = if (isWowContainer) File(foreverLogsDir, "linux_wine_boot.log") else null
+
     ProcessHelper.addDebugCallback { line ->
         if (captureLogs) {
             logFile?.appendText(line + "\n")
+            try { linuxWineBootLog?.appendText(line + "\n") } catch (ignored: Exception) {}
         }
     }
 

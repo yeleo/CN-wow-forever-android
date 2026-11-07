@@ -1433,22 +1433,41 @@ private fun prepareLaunch(context: Context, gameRoot: File, gpu: GpuProfile, scr
         LauncherDebugLogger.logException("P2_PREPARE", "InjectFEXCore", e)
     }
 
-    // 2. Ensure x64 DXVK DLLs in system32 for x64 Wow
+    // 2. Restore/ensure system32 has native ARM64 DXVK (so explorer.exe & Wow-Launcher-ARM64.exe start cleanly)
+    try {
+        val arm64DxvkDir = File(ContentsManager.getContentTypeDir(context, ContentProfile.ContentType.CONTENT_TYPE_DXVK), DXVK_VERSION)
+        listOf("d3d11.dll", "dxgi.dll").forEach { dllName ->
+            val sys32Dll = File(sys32, dllName)
+            val arm64Dll = File(arm64DxvkDir, "system32/$dllName")
+            if (arm64Dll.exists()) {
+                if (!sys32Dll.exists() || sys32Dll.length() != arm64Dll.length()) {
+                    FileUtils.copy(arm64Dll, sys32Dll)
+                    LauncherDebugLogger.log("P2_PREPARE", "Restored native ARM64 DXVK $dllName to system32 (${sys32Dll.length()} bytes)")
+                }
+            }
+        }
+    } catch (e: Exception) {
+        LauncherDebugLogger.logException("P2_PREPARE", "RestoreARM64DXVK", e)
+    }
+
+    // 3. For x64 WoW, extract x64 DXVK into gameRoot/_forever_/ as app-local DLLs
     if (useX64) {
         try {
+            val foreverDir = File(gameRoot, FLAVOR_DIR)
+            if (!foreverDir.exists()) foreverDir.mkdirs()
             listOf("d3d11.dll", "dxgi.dll").forEach { dllName ->
-                val target = File(sys32, dllName)
+                val target = File(foreverDir, dllName)
                 try {
                     context.assets.open("dxvk_x64/$dllName").use { input ->
                         target.outputStream().use { output -> input.copyTo(output) }
                     }
-                    LauncherDebugLogger.log("P2_PREPARE", "Injected x64 DXVK asset $dllName to ${target.path} (${target.length()} bytes)")
+                    LauncherDebugLogger.log("P2_PREPARE", "Extracted app-local x64 DXVK $dllName to ${target.path} (${target.length()} bytes)")
                 } catch (e: Exception) {
                     LauncherDebugLogger.log("P2_PREPARE", "x64 DXVK asset dxvk_x64/$dllName not found: ${e.message}")
                 }
             }
         } catch (e: Exception) {
-            LauncherDebugLogger.logException("P2_PREPARE", "InjectDXVK_x64", e)
+            LauncherDebugLogger.logException("P2_PREPARE", "InjectAppLocalDXVK", e)
         }
     }
 
@@ -1522,15 +1541,14 @@ private fun prepareLaunch(context: Context, gameRoot: File, gpu: GpuProfile, scr
 
 private fun containerConfig(gameRoot: File, gpu: GpuProfile, screenSize: String, useWrapper: Boolean, useX64: Boolean = false): JSONObject {
     val samsungEnv = if (Build.MANUFACTURER.equals("samsung", ignoreCase = true)) " FD_DEV_FEATURES=enable_tp_ubwc_flag_hint=1" else ""
-    val fexEnv = " HODLL=libwow64fex.dll HODLL64=libarm64ecfex.dll FEX_TSOENABLED=1 FEX_HALFBARRIERTSOENABLED=1 FEX_MULTIBLOCK=0 FEX_VECTORTSOENABLED=1 WINEDEBUG=err+all,warn+module,+loaddll"
-    val envVars = "WRAPPER_MAX_IMAGE_COUNT=0 ZINK_DESCRIPTORS=lazy ZINK_DEBUG=compact,deck_emu MESA_SHADER_CACHE_DISABLE=false MESA_SHADER_CACHE_MAX_SIZE=512MB mesa_glthread=true WINEESYNC=0 MESA_VK_WSI_PRESENT_MODE=mailbox TU_DEBUG=${gpu.tuDebug} VKD3D_SHADER_MODEL=6_0 PULSE_LATENCY_MSEC=144$samsungEnv$fexEnv"
+    val wineDebugEnv = " WINEDEBUG=err+all,warn+module,+loaddll"
+    val envVars = "WRAPPER_MAX_IMAGE_COUNT=0 ZINK_DESCRIPTORS=lazy ZINK_DEBUG=compact,deck_emu MESA_SHADER_CACHE_DISABLE=false MESA_SHADER_CACHE_MAX_SIZE=512MB mesa_glthread=true WINEESYNC=0 MESA_VK_WSI_PRESENT_MODE=mailbox TU_DEBUG=${gpu.tuDebug} VKD3D_SHADER_MODEL=6_0 PULSE_LATENCY_MSEC=144$samsungEnv$wineDebugEnv"
     val targetExe = when {
         useWrapper -> "G:\\$FLAVOR_DIR\\Wow-Launcher-ARM64.exe"
         useX64 -> "G:\\$FLAVOR_DIR\\${WowClientDownloader.X64_EXE_NAME}"
         else -> "G:\\$FLAVOR_DIR\\$EXE_NAME"
     }
     val execArgs = if (useWrapper) "" else "-d3d11"
-    val dxvkVer = if (useX64) DXVK_X64_VERSION else DXVK_VERSION
 
     return JSONObject().apply {
         put("id", CONTAINER_ID)
@@ -1541,11 +1559,11 @@ private fun containerConfig(gameRoot: File, gpu: GpuProfile, screenSize: String,
         put("graphicsDriverVersion", gpu.driver)
         put("graphicsDriverConfig", "version=${gpu.driver},adrenotoolsTurnip=1,resourceType=buffer,bcnEmulation=auto,quality=high")
         put("displayRenderer", "vulkan")
-        put("dxwrapper", "dxvk-$dxvkVer-1")
-        put("dxwrapperConfig", "version=$dxvkVer-1")
+        put("dxwrapper", "dxvk-$DXVK_VERSION-1")
+        put("dxwrapperConfig", "version=$DXVK_VERSION-1")
         put("wineVersion", "$PROTON_VERSION-1")
         put("containerVariant", "bionic")
-        put("emulator", "fexcore")
+        put("emulator", "box64")
         put("box64Version", "0.4.2")
         put("fexcoreVersion", "2608")
         put("drives", "D:/storage/emulated/0/DownloadE:/data/data/app.wowforever/storageG:${gameRoot.path}")

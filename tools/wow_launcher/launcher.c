@@ -526,14 +526,8 @@ static void RunX64ProbeIfPresent(void) {
 /* ========================================================================= */
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine, int nCmdShow) {
-    // Step 0: Ensure child processes inherit FEXCore translation and full WINEDEBUG logging
+    // Step 0: Ensure child processes inherit full WINEDEBUG logging
     SetEnvironmentVariableW(L"WINEDEBUG", L"err+all,warn+module,+loaddll");
-    SetEnvironmentVariableW(L"HODLL", L"libwow64fex.dll");
-    SetEnvironmentVariableW(L"HODLL64", L"libarm64ecfex.dll");
-    SetEnvironmentVariableW(L"FEX_TSOENABLED", L"1");
-    SetEnvironmentVariableW(L"FEX_HALFBARRIERTSOENABLED", L"1");
-    SetEnvironmentVariableW(L"FEX_MULTIBLOCK", L"0");
-    SetEnvironmentVariableW(L"FEX_VECTORTSOENABLED", L"1");
 
     LogStep("WRAPPER_START", 0);
 
@@ -711,6 +705,16 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     RunSystem32AndEnvDiagnostics();
 
     if (useX64) {
+        // Step 6d: Inject FEXCore emulator and App-Local x64 DXVK override for x64 processes
+        SetEnvironmentVariableW(L"HODLL", L"libwow64fex.dll");
+        SetEnvironmentVariableW(L"HODLL64", L"libarm64ecfex.dll");
+        SetEnvironmentVariableW(L"FEX_TSOENABLED", L"1");
+        SetEnvironmentVariableW(L"FEX_HALFBARRIERTSOENABLED", L"1");
+        SetEnvironmentVariableW(L"FEX_MULTIBLOCK", L"0");
+        SetEnvironmentVariableW(L"FEX_VECTORTSOENABLED", L"1");
+        SetEnvironmentVariableW(L"WINEDLLOVERRIDES", L"d3d11,dxgi=n,b");
+        LogRaw("[ENV_SET] Configured FEXCore and WINEDLLOVERRIDES=d3d11,dxgi=n,b for x64 execution");
+
         LogRaw("=== RECURSIVE PE IMPORT SCAN (Wow.exe) ===");
         s_scannedCount = 0;
         MarkScanned("Wow.exe");
