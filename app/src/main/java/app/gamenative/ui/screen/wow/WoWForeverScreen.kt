@@ -103,10 +103,8 @@ fun WoWForeverScreen(
     var files by remember { mutableStateOf(GamePath.Status()) }
     var isLaunching by remember { mutableStateOf(false) }
     var launchJob by remember { mutableStateOf<Job?>(null) }
-    var hasSavedLogin by remember { mutableStateOf(BattleNetSignIn.load(context) != null) }
     var region by remember(gamePath, files) { mutableStateOf(GameRegion.current(context, gamePath)) }
     var resolution by remember { mutableStateOf(RenderResolution.current(context, gpu.screenSize)) }
-    var showLoginDialog by remember { mutableStateOf(false) }
     var showWebAuthDialog by remember { mutableStateOf(false) }
     var statusText by remember { mutableStateOf(READY_STATUS) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
@@ -252,9 +250,6 @@ fun WoWForeverScreen(
         checkFiles()
         isLaunching = false
         statusText = READY_STATUS
-        if (!BattleNetSignIn.hasCredentials(context)) {
-            BattleNetSignIn.removeLoginFile(File(gamePath))
-        }
         if (versionStatus == null && !WoWLauncherState.shouldAutoLaunch) {
             checkVersionStatus()
         }
@@ -274,15 +269,9 @@ fun WoWForeverScreen(
     DisposableEffect(Unit) {
         val reset: (Any) -> Unit = {
             resetLaunch()
-            if (!BattleNetSignIn.hasCredentials(context)) {
-                BattleNetSignIn.removeLoginFile(File(gamePath))
-            }
         }
         val onLaunchFailed: (AndroidEvent.GameLaunchFailed) -> Unit = { event ->
             resetLaunch()
-            if (!BattleNetSignIn.hasCredentials(context)) {
-                BattleNetSignIn.removeLoginFile(File(gamePath))
-            }
             errorMessage = event.message
             statusText = "Launch failed"
         }
@@ -356,7 +345,7 @@ fun WoWForeverScreen(
             versionStatus = null
             if (checkFiles()) {
                 checkVersionStatus()
-                if (hasSavedLogin) launchGame()
+                if (BattleNetSignIn.hasValidWebToken(context)) launchGame()
             }
         }
     }
@@ -371,14 +360,16 @@ fun WoWForeverScreen(
     }
 
     LaunchedEffect(gamePath) {
+        BattleNetSignIn.cleanupLegacyCredentials(context, File(gamePath))
         val ready = checkFiles()
         // Every setup path reads or writes shared storage, so ask up front rather than after the user picks one.
         if (!files.hasStorageAccess) {
             showStoragePermissionDialog = true
         }
-        Timber.i("WoWForeverScreen LaunchedEffect: gamePath=$gamePath, ready=$ready, hasSavedLogin=$hasSavedLogin, shouldAutoLaunch=${WoWLauncherState.shouldAutoLaunch}")
+        val hasValidToken = BattleNetSignIn.hasValidWebToken(context)
+        Timber.i("WoWForeverScreen LaunchedEffect: gamePath=$gamePath, ready=$ready, hasValidToken=$hasValidToken, shouldAutoLaunch=${WoWLauncherState.shouldAutoLaunch}")
         when {
-            !ready || !hasSavedLogin -> {
+            !ready || !hasValidToken -> {
                 WoWLauncherState.shouldAutoLaunch = false
                 PluviaApp.events.emit(AndroidEvent.ClearBootingSplash)
                 if (files.isLegacyBeta) showUpgradeDialog = true
@@ -700,62 +691,6 @@ fun WoWForeverScreen(
 
                     Spacer(modifier = Modifier.height(12.dp))
 
-                    // 1. Configure Login / Update Login & Forget Saved
-                    if (!hasSavedLogin) {
-                        OutlinedButton(
-                            onClick = { showLoginDialog = true },
-                            enabled = !isLaunching && !isUpdating,
-                            modifier = Modifier
-                                .fillMaxWidth(0.85f)
-                                .height(46.dp),
-                            shape = RoundedCornerShape(14.dp),
-                            border = BorderStroke(1.dp, WowGold.copy(alpha = 0.8f))
-                        ) {
-                            Icon(Icons.Default.Key, contentDescription = null, modifier = Modifier.size(18.dp), tint = WowGold)
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(text = "Configure Login (战网账号密码)", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = WowGold)
-                        }
-                    } else {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(0.85f),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            OutlinedButton(
-                                onClick = { showLoginDialog = true },
-                                enabled = !isLaunching && !isUpdating,
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .height(44.dp),
-                                shape = RoundedCornerShape(12.dp),
-                                border = BorderStroke(1.dp, Color(0xFF38BDF8).copy(alpha = 0.8f))
-                            ) {
-                                Icon(Icons.Default.Key, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color(0xFF38BDF8))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Update Login", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF38BDF8))
-                            }
-                            OutlinedButton(
-                                onClick = {
-                                    BattleNetSignIn.forget(context)
-                                    BattleNetSignIn.removeLoginFile(File(gamePath))
-                                    hasSavedLogin = false
-                                    checkFiles()
-                                },
-                                enabled = !isLaunching && !isUpdating,
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .height(44.dp),
-                                shape = RoundedCornerShape(12.dp),
-                                border = BorderStroke(1.dp, WowError.copy(alpha = 0.6f))
-                            ) {
-                                Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp), tint = WowError)
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Forget Saved", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = WowError)
-                            }
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(10.dp))
 
                     // 2. Fix 14400 / 国服网页登录授信
                     val savedSt = remember(showWebAuthDialog) { BattleNetSignIn.loadWebToken(context) }
@@ -821,17 +756,6 @@ fun WoWForeverScreen(
         }
     }
 
-    if (showLoginDialog) {
-        BattleNetCredentialDialog(
-            onDismiss = { showLoginDialog = false },
-            onConfirm = { login ->
-                showLoginDialog = false
-                BattleNetSignIn.save(context, login)
-                hasSavedLogin = true
-                checkFiles()
-            },
-        )
-    }
 
     if (showWebAuthDialog) {
         BattleNetWebAuthDialog(
@@ -1407,22 +1331,7 @@ private fun prepareLaunch(context: Context, gameRoot: File, gpu: GpuProfile, scr
         !webToken.isNullOrBlank() &&
         BattleNetSignIn.ST_REGEX.matches(webToken)
 
-    val login = BattleNetSignIn.load(context)
     val useWrapper = currentRegion == GameRegion.CN && !skipInjector && hasValidSt
-
-    if (currentRegion == GameRegion.CN) {
-        // CN region: Completely bypass login.txt writing
-        BattleNetSignIn.removeLoginFile(gameRoot, reason = "CN mode (login.txt bypassed)")
-        LauncherDebugLogger.log("LOGIN_TXT", "CN mode: skipped writing login.txt")
-    } else {
-        // Non-CN regions: preserve fallback login.txt if credentials exist
-        if (login != null) {
-            BattleNetSignIn.writeLoginFile(gameRoot, login)
-            BattleNetSignIn.startLoginWatcher(gameRoot)
-        } else {
-            BattleNetSignIn.removeLoginFile(gameRoot)
-        }
-    }
 
     // Ensure client executable exists or download it
     if (!x64Exe.exists() && !arm64Exe.exists()) {

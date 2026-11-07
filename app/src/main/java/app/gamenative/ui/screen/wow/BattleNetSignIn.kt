@@ -4,14 +4,12 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
-import android.util.Base64
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import app.gamenative.ui.util.SnackbarManager
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -26,47 +24,32 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.OpenInBrowser
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import app.gamenative.Crypto
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
+import app.gamenative.ui.util.SnackbarManager
 import timber.log.Timber
 import java.io.File
 
@@ -112,141 +95,6 @@ object LauncherDebugLogger {
 }
 
 object BattleNetSignIn {
-    data class Login(val email: String, val password: String)
-
-    fun load(context: Context): Login? {
-        val prefs = prefs(context)
-        val email = prefs.getString(KEY_EMAIL, null) ?: return null
-        val sealed = prefs.getString(KEY_PASSWORD, null) ?: return null
-        return try {
-            Login(email, String(Crypto.decrypt(Base64.decode(sealed, Base64.NO_WRAP))))
-        } catch (e: Exception) {
-            Timber.w(e, "Saved Battle.net login unreadable, clearing it")
-            forget(context)
-            null
-        }
-    }
-
-    fun save(context: Context, login: Login) {
-        val sealed = Base64.encodeToString(Crypto.encrypt(login.password.toByteArray()), Base64.NO_WRAP)
-        prefs(context).edit().putString(KEY_EMAIL, login.email).putString(KEY_PASSWORD, sealed).apply()
-    }
-
-    fun forget(context: Context) {
-        prefs(context).edit().clear().apply()
-    }
-
-    fun writeLoginFile(gameRoot: File, login: Login) {
-        try {
-            val flavorDir = File(gameRoot, WowClientDownloader.FLAVOR_DIR)
-            val file = File(flavorDir, "login.txt")
-            file.parentFile?.mkdirs()
-            val text = "${login.email}\n${login.password}\n"
-            file.writeText(text)
-            val logsDir = File(flavorDir, "Logs")
-            logsDir.mkdirs()
-            LauncherDebugLogger.setLogDirectory(logsDir)
-            LauncherDebugLogger.log("LOGIN_TXT", "login.txt written (size: ${text.toByteArray().size} bytes, flavorDir: ${WowClientDownloader.FLAVOR_DIR})")
-        } catch (e: Exception) {
-            Timber.e(e, "Failed to write login.txt")
-            LauncherDebugLogger.log("LOGIN_TXT", "Failed to write login.txt: ${e.message}")
-        }
-    }
-
-    // Also clears a login.txt left in the beta folder, which the full release no longer reads.
-    fun removeLoginFile(gameRoot: File, reason: String = "manual/exit") {
-        listOf(WowClientDownloader.FLAVOR_DIR, WowClientDownloader.LEGACY_FLAVOR_DIR).forEach { flavorDir ->
-            try {
-                val file = File(File(gameRoot, flavorDir), "login.txt")
-                if (file.exists()) {
-                    val originalSize = file.length()
-                    file.writeBytes(ByteArray(originalSize.coerceAtMost(4096).toInt()))
-                    file.delete()
-                    LauncherDebugLogger.log(
-                        "LOGIN_TXT",
-                        "login.txt wiped and deleted (flavorDir: $flavorDir, size: $originalSize bytes, reason: $reason)"
-                    )
-                }
-            } catch (e: Exception) {
-                Timber.e(e, "Failed to remove login.txt")
-                LauncherDebugLogger.log("LOGIN_TXT", "Failed to remove login.txt: ${e.message}")
-            }
-        }
-    }
-
-    fun removeLoginFile(context: Context) {
-        watcherJob?.cancel()
-        try {
-            val path = GamePath.load(context)
-            removeLoginFile(File(path), reason = "app event/shutdown")
-        } catch (_: Exception) {}
-        try {
-            val defaultPath = File(android.os.Environment.getExternalStorageDirectory(), "WoW Forever")
-            removeLoginFile(defaultPath, reason = "app event/shutdown")
-        } catch (_: Exception) {}
-    }
-
-    private var watcherJob: Job? = null
-
-    fun startLoginWatcher(gameRoot: File) {
-        watcherJob?.cancel()
-        val logsDir = File(gameRoot, "${WowClientDownloader.FLAVOR_DIR}/Logs")
-        logsDir.mkdirs()
-        LauncherDebugLogger.setLogDirectory(logsDir)
-        LauncherDebugLogger.log("LOGIN_TXT", "startLoginWatcher initiated (deadline: 180s)")
-
-        watcherJob = CoroutineScope(Dispatchers.IO).launch {
-            val hotfixLog = File(logsDir, "Hotfix.log")
-            val connectionLog = File(logsDir, "connection.log")
-
-            // Rotate existing connection.log so we only detect events from this new launch session
-            if (connectionLog.exists() && connectionLog.length() > 0) {
-                try {
-                    val oldLog = File(logsDir, "connection.old.log")
-                    if (oldLog.exists()) oldLog.delete()
-                    connectionLog.renameTo(oldLog)
-                    LauncherDebugLogger.log("LOGIN_TXT", "Rotated previous connection.log to connection.old.log")
-                } catch (e: Exception) {
-                    Timber.w(e, "Failed to rotate connection.log")
-                }
-            }
-
-            // Fallback deadline: 180 seconds (3 minutes) as required
-            val deadline = System.currentTimeMillis() + 180_000L
-            var detectedReason: String? = null
-
-            while (isActive && System.currentTimeMillis() < deadline) {
-                delay(1000L)
-
-                // 1. Check connection.log for Battle.net login request
-                if (connectionLog.exists() && connectionLog.length() > 0) {
-                    try {
-                        val text = connectionLog.readText()
-                        if (text.contains("Battle.net logon requested") || text.contains("Glue login started")) {
-                            detectedReason = "detected 'Battle.net logon requested' in connection.log"
-                            break
-                        }
-                    } catch (_: Exception) {}
-                }
-
-                // 2. Check Hotfix.log for asset streaming completion
-                if (hotfixLog.exists() && hotfixLog.length() > 50_000L) {
-                    detectedReason = "Hotfix.log exceeded 50KB"
-                    break
-                }
-            }
-
-            if (detectedReason != null) {
-                LauncherDebugLogger.log("LOGIN_TXT", "Game consumed login: $detectedReason. Waiting 2s before wipe...")
-                delay(2000L)
-                removeLoginFile(gameRoot, reason = detectedReason)
-            } else {
-                LauncherDebugLogger.log("LOGIN_TXT", "Watcher deadline reached (180s). Wiping login.txt...")
-                removeLoginFile(gameRoot, reason = "fallback timeout (180s)")
-            }
-        }
-    }
-
     private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
     private const val PREFS = "battle_net_login"
@@ -258,11 +106,6 @@ object BattleNetSignIn {
     val ST_REGEX = Regex("""^CN-[0-9a-fA-F]{32}-\d+$""")
     const val ST_EXPIRATION_MINUTES = 60L
     var KEEP_ST_AFTER_USE = true
-    const val ENABLE_ACCOUNT_PROMPT_DIALOG = false
-
-    fun hasCredentials(context: Context): Boolean = load(context) != null
-
-    fun loadAccountEmail(context: Context): String? = load(context)?.email
 
     fun loadWebToken(context: Context): String? =
         prefs(context).getString(KEY_WEB_TOKEN, null)
@@ -277,6 +120,18 @@ object BattleNetSignIn {
         return ageMin >= ST_EXPIRATION_MINUTES
     }
 
+    fun hasValidWebToken(context: Context): Boolean {
+        val token = loadWebToken(context)
+        return !token.isNullOrBlank() && ST_REGEX.matches(token) && !isWebTokenExpired(context)
+    }
+
+    fun getRemainingValidMinutes(context: Context): Long {
+        val ts = loadWebTokenTimestamp(context)
+        if (ts <= 0L) return 0L
+        val ageMin = (System.currentTimeMillis() - ts) / 60000L
+        return (ST_EXPIRATION_MINUTES - ageMin).coerceAtLeast(0L)
+    }
+
     fun saveWebToken(context: Context, token: String) {
         val ts = System.currentTimeMillis()
         prefs(context).edit()
@@ -285,7 +140,7 @@ object BattleNetSignIn {
             .apply()
         LauncherDebugLogger.log(
             "WEB_AUTH",
-            "Saved ST token to SharedPreferences (length=${token.length}, prefix=${token.take(4)}***, captureTs=$ts)",
+            "Saved ST token to SharedPreferences (length=${token.length}, regexMatch=true, captureTs=$ts)",
         )
     }
 
@@ -296,58 +151,49 @@ object BattleNetSignIn {
             .apply()
         LauncherDebugLogger.log("TOKEN_INJECT", "Cleared web token from SharedPreferences")
     }
-}
 
-@Composable
-fun BattleNetCredentialDialog(
-    onDismiss: () -> Unit,
-    onConfirm: (BattleNetSignIn.Login) -> Unit,
-) {
-    var email by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
-    val emailFocus = remember { FocusRequester() }
-    val keyboard = LocalSoftwareKeyboardController.current
-    LaunchedEffect(Unit) {
-        delay(DIALOG_SETTLE_MS)
-        emailFocus.requestFocus()
-        keyboard?.show()
-    }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Battle.net login") },
-        text = {
-            Column {
-                Text("Saved encrypted on this device. WoW will automatically log in on launch.")
-                Spacer(Modifier.height(12.dp))
-                OutlinedTextField(
-                    value = email,
-                    onValueChange = { email = it },
-                    label = { Text("Email") },
-                    singleLine = true,
-                    modifier = Modifier.focusRequester(emailFocus),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
-                )
-                OutlinedTextField(
-                    value = password,
-                    onValueChange = { password = it },
-                    label = { Text("Password") },
-                    singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                )
+    fun cleanupLegacyCredentials(context: Context, gameRoot: File? = null) {
+        try {
+            // 1. Clear SharedPreferences email & password
+            val p = prefs(context)
+            if (p.contains(KEY_EMAIL) || p.contains(KEY_PASSWORD)) {
+                p.edit().remove(KEY_EMAIL).remove(KEY_PASSWORD).apply()
             }
-        },
-        confirmButton = {
-            TextButton(
-                enabled = email.isNotBlank() && password.isNotEmpty(),
-                onClick = { onConfirm(BattleNetSignIn.Login(email.trim(), password)) },
-            ) { Text("Save") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
-    )
-}
 
-private const val DIALOG_SETTLE_MS = 300L
+            // 2. Clear KeyStore secret entry if present
+            runCatching {
+                val ks = java.security.KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+                if (ks.containsAlias("pluvia_secret")) {
+                    ks.deleteEntry("pluvia_secret")
+                }
+            }
+
+            // 3. Search and zero-fill wipe legacy login.txt files
+            val roots = mutableListOf<File>()
+            gameRoot?.let { roots.add(it) }
+            runCatching {
+                val saved = GamePath.load(context)
+                if (saved.isNotBlank()) roots.add(File(saved))
+            }
+            roots.add(File(android.os.Environment.getExternalStorageDirectory(), "WoW Forever"))
+
+            val flavors = listOf(WowClientDownloader.FLAVOR_DIR, WowClientDownloader.LEGACY_FLAVOR_DIR)
+            for (root in roots.distinct()) {
+                for (flv in flavors) {
+                    val loginFile = File(File(root, flv), "login.txt")
+                    if (loginFile.exists()) {
+                        val len = loginFile.length()
+                        loginFile.writeBytes(ByteArray(len.coerceAtMost(4096).toInt()))
+                        loginFile.delete()
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Timber.w(e, "Error during legacy credentials cleanup")
+        }
+        LauncherDebugLogger.log("LEGACY_CLEANUP", "Legacy credentials cleaned up: no sensitive data remaining")
+    }
+}
 
 private const val AUTH_URL = "https://account.battlenet.com.cn/login/zh/?externalChallenge=login&app=wow"
 
@@ -358,52 +204,7 @@ fun BattleNetWebAuthDialog(
     val context = LocalContext.current
     var currentUrl by remember { mutableStateOf(AUTH_URL) }
     var webViewInstance by remember { mutableStateOf<WebView?>(null) }
-    var hasCapturedToken by remember { mutableStateOf(!BattleNetSignIn.loadWebToken(context).isNullOrBlank()) }
-    var showAccountPrompt by remember { mutableStateOf(false) }
-    var accountInput by remember { mutableStateOf("") }
-
-    if (showAccountPrompt) {
-        AlertDialog(
-            onDismissRequest = {
-                showAccountPrompt = false
-                onDismiss()
-            },
-            title = { Text("设置战网账号") },
-            text = {
-                Column {
-                    Text("授信 Token 已成功捕获！请输入该 Token 对应的战网账号（邮箱或手机号），以用于完成凭据注入：")
-                    Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = accountInput,
-                        onValueChange = { accountInput = it },
-                        label = { Text("战网账号 / 邮箱") },
-                        singleLine = true,
-                    )
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    enabled = accountInput.isNotBlank(),
-                    onClick = {
-                        val trimmed = accountInput.trim()
-                        BattleNetSignIn.save(context, BattleNetSignIn.Login(trimmed, ""))
-                        showAccountPrompt = false
-                        onDismiss()
-                    },
-                ) {
-                    Text("保存并完成")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = {
-                    showAccountPrompt = false
-                    onDismiss()
-                }) {
-                    Text("跳过")
-                }
-            },
-        )
-    }
+    var hasCapturedToken by remember { mutableStateOf(BattleNetSignIn.hasValidWebToken(context)) }
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -435,7 +236,7 @@ fun BattleNetWebAuthDialog(
                             color = Color(0xFFF59E0B),
                         )
                         Text(
-                            text = if (hasCapturedToken) "状态: 已成功捕获有效 ST Token" else "请在下方登录网易通行证以完成授权挑战",
+                            text = if (hasCapturedToken) "状态: 已成功捕获有效 ST 票据" else "请在下方登录网易通行证以完成授权挑战",
                             fontSize = 11.sp,
                             color = if (hasCapturedToken) Color(0xFF22C55E) else Color(0xFF94A3B8),
                         )
@@ -543,22 +344,13 @@ fun BattleNetWebAuthDialog(
                                             BattleNetSignIn.saveWebToken(context, token)
                                             hasCapturedToken = true
                                             SnackbarManager.show("已成功捕获国服战网授信 Token！")
-                                            if (BattleNetSignIn.ENABLE_ACCOUNT_PROMPT_DIALOG) {
-                                                val saved = BattleNetSignIn.load(context)
-                                                if (saved == null || saved.email.isBlank()) {
-                                                    showAccountPrompt = true
-                                                } else {
-                                                    onDismiss()
-                                                }
-                                            } else {
-                                                onDismiss()
-                                            }
+                                            onDismiss()
                                             return true
                                         } else {
                                             SnackbarManager.show("捕获的授信票据格式异常，已丢弃")
                                             LauncherDebugLogger.log(
                                                 "WEB_AUTH",
-                                                "Token format regex mismatch, dropped: len=${token.length}, prefix=${token.take(4)}***",
+                                                "Token format regex mismatch, dropped: len=${token.length}",
                                             )
                                         }
                                     }

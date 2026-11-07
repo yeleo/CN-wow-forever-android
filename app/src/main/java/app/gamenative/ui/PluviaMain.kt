@@ -64,7 +64,6 @@ import app.gamenative.ui.enums.DialogType
 import app.gamenative.ui.enums.Orientation
 import app.gamenative.ui.model.MainViewModel
 import app.gamenative.ui.screen.PluviaScreen
-import app.gamenative.ui.screen.wow.BattleNetSignIn
 import app.gamenative.ui.screen.wow.GamePath
 import app.gamenative.ui.screen.wow.LauncherDebugLogger
 import app.gamenative.ui.screen.wow.WoWForeverScreen
@@ -300,7 +299,6 @@ fun PluviaMain(
                         initialSplash = false
                         preLaunchJob?.cancel()
                         preLaunchJob = null
-                        BattleNetSignIn.removeLoginFile(File(GamePath.load(context)))
                         viewModel.setLoadingDialogVisible(false)
                         WoWLauncherState.shouldAutoLaunch = false
                         viewModel.abortBoot()
@@ -371,11 +369,9 @@ fun PluviaMain(
                             viewModel.onWindowMapped(context, window, state.launchedAppId)
                         },
                         onExit = { onComplete ->
-                            BattleNetSignIn.removeLoginFile(File(GamePath.load(context)))
                             viewModel.exitApp(context, state.launchedAppId, onComplete)
                         },
                         onGameLaunchError = { error ->
-                            BattleNetSignIn.removeLoginFile(File(GamePath.load(context)))
                             viewModel.onGameLaunchError(error)
                         },
                     )
